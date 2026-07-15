@@ -1,0 +1,24 @@
+# ---------------------------------------------------------------------------
+# Books. Never commit these.
+#
+# On a free GitHub plan the repo is public, so a committed PDF is a copyrighted
+# book you have published to the internet under your own name. Git also keeps it
+# forever: deleting the file in a later commit does not remove it from history,
+# and GitHub Pages will happily keep serving it. Un-publishing means rewriting
+# history with git filter-repo and force-pushing, and by then it's been crawled.
+#
+# Books belong in the private Supabase Storage bucket. That's what it's for.
+# ---------------------------------------------------------------------------
+*.pdf
+*.epub
+
+# Secrets. src/config.js holds the anon key, which is public by design and SHOULD
+# be committed. This is here for the service_role key, which bypasses RLS entirely
+# and must never reach a browser or a repo.
+.env
+.env.*
+*.service_role
+service-role*
+
+.DS_Store
+node_modules/

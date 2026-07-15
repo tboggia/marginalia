@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Marginalia</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230E1116'/%3E%3Ccircle cx='16' cy='10' r='4' fill='%23E9A13B'/%3E%3Ccircle cx='16' cy='22' r='3' fill='%233FBFC9'/%3E%3C/svg%3E">
+<style>
+  /* ---------------------------------------------------------------
+     Design tokens.
+
+     The page is a white rectangle we don't control, so everything we
+     do control goes dark and quiet and lets the paper be the only lit
+     thing on screen. Amber and cyan as the two default reader colors
+     is a deliberate pick: yellow-vs-blue is the one axis that stays
+     distinguishable under every common form of color blindness.
+     --------------------------------------------------------------- */
+  :root {
+    --ink:        #0E1116;
+    --panel:      #161B22;
+    --raised:     #1D242D;
+    --rule:       #262E39;
+    --text:       #DCE3EB;
+    --muted:      #7C8794;
+    --faint:      #4B5563;
+
+    --c-amber:   #E9A13B;
+    --c-cyan:    #3FBFC9;
+    --c-magenta: #D95B9A;
+    --c-violet:  #8A7BE0;
+    --c-lime:    #7FBF3F;
+    --c-coral:   #E4663F;
+
+    --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+    --spine-w: 60px;
+    --panel-w: 320px;
+    --top-h: 52px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--ink); color: var(--text);
+    font-family: var(--ui);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--c-cyan); outline-offset: 2px; border-radius: 3px; }
+
+  /* ---------------------------------------------------------------- shell */
+  #app {
+    display: grid;
+    grid-template-columns: var(--spine-w) 1fr var(--panel-w);
+    grid-template-rows: var(--top-h) 1fr;
+    grid-template-areas: "top top top" "spine scroller panel";
+    height: 100%;
+  }
+  #app[data-panel="closed"] { grid-template-columns: var(--spine-w) 1fr 0; }
+
+  /* ---------------------------------------------------------------- topbar */
+  #top {
+    grid-area: top;
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--panel);
+  }
+  #title {
+    font-size: 13px; font-weight: 600; letter-spacing: .01em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 30ch;
+  }
+  #title:empty::before { content: "No book open"; color: var(--faint); font-weight: 400; }
+
+  .sep { width: 1px; height: 22px; background: var(--rule); flex: none; }
+  .spacer { flex: 1; }
+
+  .tool {
+    display: flex; align-items: center; gap: 6px;
+    height: 30px; padding: 0 10px; border-radius: 6px;
+    font-size: 12px; color: var(--muted);
+    transition: background .12s, color .12s;
+  }
+  .tool:hover { background: var(--raised); color: var(--text); }
+  .tool[aria-pressed="true"] { background: var(--raised); color: var(--text); box-shadow: inset 0 0 0 1px var(--rule); }
+  .tool svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+  #zoom { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 4ch; text-align: center; }
+
+  /* swatches */
+  #palette { display: flex; gap: 5px; align-items: center; }
+  .swatch {
+    width: 18px; height: 18px; border-radius: 50%;
+    box-shadow: inset 0 0 0 1.5px rgba(0,0,0,.35);
+    transition: transform .12s;
+  }
+  .swatch:hover { transform: scale(1.15); }
+  .swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px currentColor; }
+
+  /* ---------------------------------------------------------------- spine
+     The signature element. The whole book as one vertical track, with a
+     marker for each reader and a tick for every annotation. It's the only
+     place in the interface where "we are reading this apart" is a visible,
+     measurable thing rather than an idea.                                  */
+  #spine {
+    grid-area: spine;
+    position: relative;
+    border-right: 1px solid var(--rule);
+    background: var(--panel);
+  }
+  #track {
+    position: absolute; left: 50%; top: 40px; bottom: 40px;
+    width: 2px; margin-left: -1px;
+    background: var(--rule); border-radius: 1px;
+  }
+  .tick {
+    position: absolute; left: 50%; width: 9px; height: 2px;
+    margin-left: -4.5px; border-radius: 1px; opacity: .5;
+  }
+  .marker {
+    position: absolute; left: 50%; width: 22px; height: 22px; margin-left: -11px;
+    border-radius: 50%; transform: translateY(-50%);
+    display: grid; place-items: center;
+    font: 600 9px/1 var(--mono);
+    color: var(--ink);
+    transition: top .5s cubic-bezier(.22,1,.36,1);
+    cursor: pointer;
+  }
+  .marker.them { width: 16px; height: 16px; margin-left: -8px; font-size: 0; }
+  .marker.them::after {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--ink);
+  }
+  #gap {
+    position: absolute; left: 0; right: 0;
+    font: 500 9px/1.3 var(--mono);
+    color: var(--faint); text-align: center;
+    pointer-events: none;
+    transition: top .5s cubic-bezier(.22,1,.36,1);
+  }
+  #spine-top, #spine-bot {
+    position: absolute; left: 0; right: 0; text-align: center;
+    font: 500 9px var(--mono); color: var(--faint);
+  }
+  #spine-top { top: 18px; }
+  #spine-bot { bottom: 18px; }
+
+  /* ---------------------------------------------------------------- pages */
+  #scroller {
+    grid-area: scroller;
+    overflow: auto; overscroll-behavior: contain;
+    background: var(--ink);
+    scrollbar-width: thin; scrollbar-color: var(--rule) transparent;
+  }
+  #pages { padding: 28px 0 60vh; display: flex; flex-direction: column; align-items: center; gap: 20px; }
+
+  .page {
+    position: relative; flex: none;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0,0,0,.5), 0 10px 34px rgba(0,0,0,.42);
+  }
+  .page > canvas, .page > div { position: absolute; inset: 0; }
+  canvas.pdf { z-index: 1; }
+  .hl-layer  { z-index: 2; pointer-events: none; mix-blend-mode: multiply; }
+  .text-layer{ z-index: 3; overflow: hidden; line-height: 1; text-size-adjust: none; }
+  canvas.ink { z-index: 4; touch-action: pan-y; }
+  .page-num {
+    position: absolute; inset: auto auto -18px 0; height: 14px;
+    font: 500 9px var(--mono); color: var(--faint);
+    pointer-events: none;
+  }
+
+  .text-layer span {
+    position: absolute; white-space: pre; transform-origin: 0% 0%;
+    color: transparent; cursor: text;
+  }
+  .text-layer ::selection { background: rgba(63,191,201,.35); }
+  #app[data-ink="on"] .text-layer { pointer-events: none; }
+  #app[data-ink="on"] canvas.ink { touch-action: pan-y; cursor: crosshair; }
+
+  .hl {
+    position: absolute; border-radius: 1.5px;
+    pointer-events: auto; cursor: pointer;
+  }
+  .hl.has-note { border-bottom: 1.5px solid currentColor; }
+
+  /* ---------------------------------------------------------------- popover */
+  #pop {
+    position: fixed; z-index: 40;
+    display: none; align-items: center; gap: 4px;
+    padding: 5px; border-radius: 8px;
+    background: var(--raised);
+    border: 1px solid var(--rule);
+    box-shadow: 0 8px 26px rgba(0,0,0,.55);
+  }
+  #pop[data-open="true"] { display: flex; }
+  #pop .swatch { width: 17px; height: 17px; }
+  #pop button.act {
+    height: 26px; padding: 0 8px; border-radius: 5px;
+    font-size: 11px; color: var(--muted);
+  }
+  #pop button.act:hover { background: var(--panel); color: var(--text); }
+
+  /* ---------------------------------------------------------------- panel */
+  #panel {
+    grid-area: panel;
+    border-left: 1px solid var(--rule);
+    background: var(--panel);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  #app[data-panel="closed"] #panel { display: none; }
+  #panel-head {
+    display: flex; align-items: center; gap: 8px;
+    height: 38px; padding: 0 12px;
+    border-bottom: 1px solid var(--rule);
+    font-size: 11px; color: var(--muted);
+    letter-spacing: .04em; text-transform: uppercase;
+  }
+  #notes { flex: 1; overflow-y: auto; padding: 8px; }
+  .note {
+    padding: 10px; border-radius: 7px; margin-bottom: 6px;
+    background: var(--raised);
+    border-left: 2px solid currentColor;
+    cursor: pointer;
+  }
+  .note:hover { background: #232B35; }
+  .note-meta {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font: 500 9px var(--mono); color: var(--faint); margin-bottom: 5px;
+  }
+  .note-who { color: currentColor; }
+  .note-quote {
+    font-size: 11.5px; line-height: 1.45; color: var(--muted);
+    border-left: 2px solid var(--rule); padding-left: 7px; margin-bottom: 6px;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .note-body { font-size: 12.5px; line-height: 1.5; color: var(--text); white-space: pre-wrap; }
+  .empty {
+    padding: 28px 16px; text-align: center;
+    font-size: 12px; line-height: 1.6; color: var(--faint);
+  }
+
+  /* ---------------------------------------------------------------- dialogs */
+  dialog {
+    padding: 0; border: 1px solid var(--rule); border-radius: 10px;
+    background: var(--raised); color: var(--text);
+    box-shadow: 0 24px 70px rgba(0,0,0,.7);
+    max-width: 380px; width: calc(100% - 32px);
+  }
+  dialog::backdrop { background: rgba(5,7,10,.72); backdrop-filter: blur(2px); }
+  .dlg { padding: 18px; }
+  .dlg h2 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+  .dlg p { margin: 0 0 14px; font-size: 12px; line-height: 1.55; color: var(--muted); }
+  .dlg textarea, .dlg input[type="text"] {
+    width: 100%; padding: 9px 10px; border-radius: 6px;
+    background: var(--ink); color: var(--text);
+    border: 1px solid var(--rule); font: inherit; font-size: 12.5px;
+    resize: vertical;
+  }
+  .dlg textarea { min-height: 92px; line-height: 1.5; }
+  .dlg-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  .btn { height: 30px; padding: 0 13px; border-radius: 6px; font-size: 12px; background: var(--panel); }
+  .btn:hover { background: var(--rule); }
+  .btn.primary { background: var(--text); color: var(--ink); font-weight: 600; }
+  .btn.primary:hover { background: #fff; }
+  .btn.danger:hover { background: #4A1F1F; color: #F0A0A0; }
+
+  /* ---------------------------------------------------------------- start */
+  #start { position: absolute; inset: var(--top-h) 0 0 var(--spine-w); display: grid; place-items: center; background: var(--ink); z-index: 20; }
+  #start[hidden] { display: none; }
+  #drop {
+    width: min(440px, calc(100% - 48px)); padding: 40px 28px;
+    border: 1px dashed var(--rule); border-radius: 12px; text-align: center;
+    transition: border-color .15s, background .15s;
+  }
+  #drop.over { border-color: var(--c-amber); background: rgba(233,161,59,.05); }
+  #drop h1 { margin: 0 0 8px; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+  #drop p { margin: 0 0 18px; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+  #recent { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--rule); text-align: left; }
+  #recent:empty { display: none; }
+  .recent-item {
+    display: flex; justify-content: space-between; width: 100%;
+    padding: 7px 8px; border-radius: 5px; font-size: 12px; color: var(--muted);
+  }
+  .recent-item:hover { background: var(--raised); color: var(--text); }
+  .recent-item span { font: 500 10px var(--mono); color: var(--faint); }
+
+  #auth {
+    position: fixed; inset: 0; z-index: 50;
+    display: grid; place-items: center; background: var(--ink);
+  }
+  #auth[hidden] { display: none; }
+  #auth .card {
+    width: min(360px, calc(100% - 40px)); padding: 30px 26px;
+    border: 1px solid var(--rule); border-radius: 12px; background: var(--panel);
+  }
+  #auth h1 { margin: 0 0 8px; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+  #auth p { margin: 0 0 16px; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+  #auth input {
+    width: 100%; height: 34px; padding: 0 10px; border-radius: 6px;
+    background: var(--ink); color: var(--text); border: 1px solid var(--rule);
+    font: inherit; font-size: 13px;
+  }
+  #auth-msg { margin: 12px 0 0; font-size: 11.5px; }
+  #auth-msg:empty { display: none; }
+  #auth-msg[data-kind="error"] { color: #E8907A; }
+  #auth-msg[data-kind="sent"] { color: var(--c-cyan); }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 12px);
+    padding: 8px 14px; border-radius: 7px;
+    background: var(--raised); border: 1px solid var(--rule);
+    font-size: 12px; color: var(--text);
+    opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+    z-index: 60;
+  }
+  #toast[data-show="true"] { opacity: 1; transform: translate(-50%, 0); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+  }
+  @media (max-width: 900px) {
+    :root { --panel-w: 0px; --spine-w: 44px; }
+    #app { grid-template-columns: var(--spine-w) 1fr 0; }
+    #panel { display: none; }
+    #zoom, #zoom-out, #zoom-in { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div id="app" data-panel="open" data-ink="off">
+
+  <header id="top">
+    <div id="title"></div>
+    <div class="sep"></div>
+
+    <button class="tool" id="t-select" aria-pressed="true" title="Select text to highlight">
+      <svg viewBox="0 0 24 24"><path d="M4 4l7 16 2-7 7-2z"/></svg>Select
+    </button>
+    <button class="tool" id="t-ink" aria-pressed="false" title="Draw with a stylus (a pen always draws)">
+      <svg viewBox="0 0 24 24"><path d="M17 3l4 4L8 20l-5 1 1-5z"/></svg>Draw
+    </button>
+    <button class="tool" id="t-erase" aria-pressed="false" title="Erase your own ink">
+      <svg viewBox="0 0 24 24"><path d="M4 16l6-6 8 8-3 3H7zM10 10l5-5 8 8-5 5"/></svg>Erase
+    </button>
+
+    <div class="sep"></div>
+    <div id="palette"></div>
+
+    <div class="spacer"></div>
+
+    <button class="tool" id="zoom-out" title="Zoom out">−</button>
+    <div id="zoom">120%</div>
+    <button class="tool" id="zoom-in" title="Zoom in">+</button>
+    <div class="sep"></div>
+    <button class="tool" id="t-jump" title="Jump to where they are">
+      <svg viewBox="0 0 24 24"><path d="M12 21s7-5.6 7-11a7 7 0 10-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>
+      <span id="jump-label">Find them</span>
+    </button>
+    <button class="tool" id="t-invite" title="Copy a link that lets one other person in" hidden>
+      <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7L12 19"/></svg>
+      Invite
+    </button>
+    <button class="tool" id="t-who" title="Change your name and color">You</button>
+    <button class="tool" id="t-panel" aria-pressed="true" title="Show notes">
+      <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/></svg>
+    </button>
+  </header>
+
+  <nav id="spine" aria-label="Position in the book">
+    <div id="spine-top">1</div>
+    <div id="track"></div>
+    <div id="spine-bot">—</div>
+    <div id="gap"></div>
+  </nav>
+
+  <main id="scroller"><div id="pages"></div></main>
+
+  <aside id="panel">
+    <div id="panel-head"><span>Margin</span><div class="spacer"></div><span id="note-count"></span></div>
+    <div id="notes"></div>
+  </aside>
+</div>
+
+<div id="pop" data-open="false"></div>
+
+<div id="auth" hidden>
+  <div class="card">
+    <h1>Marginalia</h1>
+    <p id="auth-lede">Sign in and your books, your place, and your margin follow you to any device.</p>
+    <input type="email" id="auth-email" placeholder="you@example.com" autocomplete="email">
+    <button class="btn primary" id="auth-go" style="width:100%;margin-top:10px;height:34px">Email me a link</button>
+    <p id="auth-msg"></p>
+  </div>
+</div>
+
+<div id="start">
+  <div id="drop">
+    <h1>Open a book</h1>
+    <p>Drop a DRM-free PDF here, or choose a file. It stays on this device until you connect a backend.</p>
+    <button class="btn primary" id="pick">Choose a PDF</button>
+    <input type="file" id="file" accept="application/pdf" hidden>
+    <div id="recent"></div>
+  </div>
+</div>
+
+<dialog id="note-dlg"><form method="dialog" class="dlg">
+  <h2>Note</h2>
+  <p id="note-quote"></p>
+  <textarea id="note-text" placeholder="What did you think?"></textarea>
+  <div class="dlg-row">
+    <button class="btn danger" value="delete" id="note-del">Delete</button>
+    <div class="spacer"></div>
+    <button class="btn" value="cancel">Cancel</button>
+    <button class="btn primary" value="save">Save note</button>
+  </div>
+</form></dialog>
+
+<dialog id="who-dlg"><form method="dialog" class="dlg">
+  <h2>Who's reading</h2>
+  <p>Your name and color appear in the margin and on the spine. Open this book in a second tab to see the other side.</p>
+  <input type="text" id="who-name" placeholder="Your name" maxlength="24">
+  <div style="margin-top:12px"><div id="who-palette" class="swatch-row" style="display:flex;gap:8px"></div></div>
+  <div class="dlg-row">
+    <button class="btn" value="cancel">Cancel</button>
+    <button class="btn primary" value="save">Save</button>
+  </div>
+</form></dialog>
+
+<div id="toast"></div>
+
+<script type="module" src="./src/app.js"></script>
+</body>
+</html>
