@@ -168,8 +168,16 @@ create policy read_books on storage.objects for select
     )
   );
 
+-- Check the path prefix, not `owner`. On an INSERT into storage.objects, `owner` is
+-- populated server-side *after* this WITH CHECK runs, so `owner = auth.uid()` compares
+-- against NULL and every upload is rejected with "new row violates row-level security
+-- policy." Uploads go to `${auth.uid()}/...`, so the first path segment already carries
+-- the identity we want to enforce.
 create policy upload_books on storage.objects for insert
-  with check (bucket_id = 'books' and owner = auth.uid());
+  with check (
+    bucket_id = 'books'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
 
 
 -- ============================================================================

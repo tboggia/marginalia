@@ -258,8 +258,10 @@ async function ingest(file) {
 async function openDoc(id, title, format = 'pdf') {
   reader?.destroy();
   reader = format === 'epub'
-    // Lazy-loaded so a PDF-only session never pays for epub.js/JSZip.
-    ? new EpubReader($('#pages'), (await import('https://cdn.jsdelivr.net/npm/epubjs@0.3.93/+esm')).default)
+    // Lazy-loaded so a PDF-only session never pays for epub.js/JSZip. esm.sh, not
+    // jsdelivr's /+esm: the latter emits epub.js's transitive es5-ext dep as a
+    // separate module URL with a null-byte path that browsers reject via CORS.
+    ? new EpubReader($('#pages'), (await import('https://esm.sh/epubjs@0.3.93')).default)
     : new Reader($('#pages'), pdfjsLib);
 
   docId = id;
