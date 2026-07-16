@@ -134,15 +134,14 @@ async function boot() {
     me = {
       id: store.user.id,
       name: store.user.user_metadata?.name ?? store.user.email?.split('@')[0] ?? 'You',
-      // Same key the palette and who-dialog write (uidKey + ':color'). This used to
-      // read 'marginalia:color', which nothing ever wrote — so the picked color
+      // Same key the who-dialog writes (uidKey + ':color'). This used to read
+      // 'marginalia:color', which nothing ever wrote — so the picked color
       // silently reverted to amber on every refresh in hosted mode.
       color: pref(uidKey + ':color', COLORS[0].hex),
     };
     $('#auth').hidden = true;
   }
 
-  buildPalette();
   bindTools();
   bindStart();
   bindSelection();
@@ -151,6 +150,10 @@ async function boot() {
   $('#t-who').textContent = me.name;
   await renderRecent();
   await handleInviteLink();
+  // Only now is it known that no auth gate is coming (and whether an invite already
+  // opened a book), so this is the first moment the drop screen can appear without
+  // flashing beneath a sign-in overlay.
+  if (!docId) $('#start').hidden = false;
 }
 
 /* ------------------------------------------------------------------- auth */
@@ -222,6 +225,9 @@ async function renderRecent() {
   const docs = await store.listDocuments();
   const el = $('#recent');
   el.innerHTML = '';
+  // The whole shelf card hides when there's nothing on it — an empty "Your books"
+  // box under the drop zone reads as something having gone missing.
+  $('#shelf').hidden = !docs.length;
   if (!docs.length) return;
   for (const d of docs.slice(0, 5)) {
     const b = document.createElement('button');
@@ -487,6 +493,8 @@ function bindTools() {
     const open = app.dataset.panel === 'open';
     app.dataset.panel = open ? 'closed' : 'open';
     $('#t-panel').ariaPressed = String(!open);
+    // The glyph swap lives in CSS (data-panel); the tooltip has to follow it here.
+    $('#t-panel').title = open ? 'Show the margin' : 'Hide the margin';
   };
 
   $('#t-jump').onclick = () => {
@@ -534,26 +542,6 @@ function syncZoomUI() {
   $('#zoom-in').disabled = reader.scale >= reader.maxScale - 1e-6;
 }
 
-function buildPalette() {
-  const wrap = $('#palette');
-  wrap.innerHTML = '';
-  for (const c of COLORS) {
-    const b = document.createElement('button');
-    b.className = 'swatch';
-    b.style.background = c.hex;
-    b.style.color = c.hex;
-    b.ariaPressed = String(c.hex === me.color);
-    b.title = c.name;
-    b.onclick = async () => {
-      me.color = c.hex;
-      setPref(uidKey + ':color', c.hex);
-      buildPalette();
-      if (docId) await store.saveMember(docId, { userId: me.id, name: me.name, color: c.hex });
-    };
-    wrap.appendChild(b);
-  }
-}
-
 /* -------------------------------------------------------------- highlights */
 function handleSelection(sel) {
   if (!sel) return closePopover();
@@ -566,6 +554,13 @@ function handleSelection(sel) {
 }
 
 function bindSelection() {
+  // Click-away closes the popover. This fires on the way *into* any new gesture —
+  // including the drag that will open the next popover — so the stale one never
+  // lingers under it. Clicks on the popover itself are the one exception.
+  document.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest('#pop')) closePopover();
+  });
+
   document.addEventListener('pointerup', (e) => {
     if (tool !== 'select' || e.pointerType === 'pen' || reader?.kind === 'epub') return;
     // Let the browser finish resolving the selection before reading it. EPUB never
@@ -587,8 +582,8 @@ function bindSelection() {
 function openPopover(sel, x, y) {
   const pop = $('#pop');
   pop.innerHTML = '';
-  // Your color is a standing preference (the toolbar palette / who-dialog), not a
-  // per-highlight decision — the popover shows it, it doesn't ask.
+  // Your color is a standing preference (set in the who-dialog), not a per-highlight
+  // decision — the popover shows it, it doesn't ask.
   const hl = document.createElement('button');
   hl.className = 'act';
   hl.innerHTML = `<span class="dot" style="background:${me.color}"></span>Highlight`;
@@ -867,7 +862,6 @@ function bindWhoDialog() {
     setPref(uidKey + ':name', me.name);
     setPref(uidKey + ':color', me.color);
     $('#t-who').textContent = me.name;
-    buildPalette();
     if (docId) {
       await store.saveMember(docId, { userId: me.id, name: me.name, color: me.color });
       const i = members.findIndex((m) => m.userId === me.id);

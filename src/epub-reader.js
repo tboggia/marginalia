@@ -137,15 +137,21 @@ export class EpubReader {
     if (existing) existing.el = doc.body;
     else this.pages.push({ num: spineIndex, el: doc.body });
 
+    // Events inside the chapter iframe never reach the host document's listeners, so
+    // popover dismissal (click-away, Escape) has to be replicated in here.
     doc.addEventListener('pointerup', (e) => {
       if (e.pointerType === 'pen') return;
       clearTimeout(this._selectionTimer);
       this._selectionTimer = setTimeout(() => {
         const iframeEl = contents.window.frameElement;
         if (!iframeEl) return;
-        const sel = readEpubSelection(contents, iframeEl, spineIndex);
-        if (sel) this.onSelectionChange(sel);
+        // Null (a collapsed click) goes through too: that's what tells app.js the
+        // reader clicked away, and the popover closes just like it does over a PDF.
+        this.onSelectionChange(readEpubSelection(contents, iframeEl, spineIndex));
       }, 0);
+    });
+    doc.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') this.onSelectionChange(null);
     });
 
     this.renderAnnotations?.(spineIndex);
