@@ -15,7 +15,7 @@
  * page, one above the other, which is how they end up in the wrong place.
  */
 export const config = {
-  supabaseUrl: 'https://sijnpxrfgsmuozhokxpv.supabase.co/rest/v1/',      // https://xxxxxxxxxxxx.supabase.co
+  supabaseUrl: 'https://sijnpxrfgsmuozhokxpv.supabase.co/',      // https://xxxxxxxxxxxx.supabase.co
   supabaseAnonKey: 'sb_publishable_z7wMXYCnc0ttMIu9NzJWlA_8p1x_lEf',  // the anon / publishable key — NOT service_role
 };
 
