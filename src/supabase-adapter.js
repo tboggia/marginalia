@@ -19,6 +19,10 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { sha256 } from './store.js';
 
+/** Storage's "that object is already there" — a 409 / "Duplicate". See putDocument. */
+const isDuplicate = (err) =>
+  err?.statusCode === '409' || err?.statusCode === 409 || /exists|duplicate/i.test(err?.message ?? '');
+
 const toCamel = (r) => ({
   id: r.id,
   docId: r.document_id,
@@ -98,9 +102,22 @@ export class SupabaseStore {
       return { docId: found.id, title: found.title, format: found.format, storagePath: found.storage_path };
     }
 
+    // No upsert, deliberately. `upsert: true` sends x-upsert, which turns the write
+    // into INSERT ... ON CONFLICT DO UPDATE — and that makes Postgres consult the
+    // UPDATE *and SELECT* policies, not just INSERT. read_books (the SELECT policy)
+    // requires a documents row whose storage_path matches this object, but that row is
+    // written below, *after* the upload. So an upsert can never satisfy it and every
+    // upload dies with "new row violates row-level security policy". A plain insert
+    // only checks upload_books, which is exactly the rule we mean to enforce.
+    //
+    // Nothing is lost: the path is content-addressed (sha256), and the lookup above
+    // already returns early when this book is known. If the object is somehow present
+    // without its documents row — a previous run that died between the two writes —
+    // the bytes at that path are byte-identical by definition, so "already exists" is
+    // success, not a failure.
     const path = `${this.user.id}/${hash}.${format}`;
-    const up = await this.sb.storage.from('books').upload(path, file, { upsert: true });
-    if (up.error) throw up.error;
+    const up = await this.sb.storage.from('books').upload(path, file);
+    if (up.error && !isDuplicate(up.error)) throw up.error;
 
     const { data, error } = await this.sb
       .from('documents')
