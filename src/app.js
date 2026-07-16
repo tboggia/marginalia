@@ -410,7 +410,7 @@ function bindTools() {
     const o = other();
     const p = o && progress[o.userId];
     if (!p) return toast('Nobody else has opened this book yet.');
-    reader.goTo(p, true);
+    reader?.goTo(p, true);
   };
 
   $('#t-who').onclick = openWhoDialog;
@@ -423,12 +423,21 @@ function bindTools() {
     if (e.key === 'd' && reader?.kind !== 'epub') setTool('ink');
     if (e.key === 'e' && reader?.kind !== 'epub') setTool('erase');
     if (e.key === 'Escape') closePopover();
-    if ((e.metaKey || e.ctrlKey) && e.key === '=') { e.preventDefault(); setZoom(reader.scale + 0.2); }
-    if ((e.metaKey || e.ctrlKey) && e.key === '-') { e.preventDefault(); setZoom(reader.scale - 0.2); }
+    if ((e.metaKey || e.ctrlKey) && e.key === '=') { e.preventDefault(); zoomBy(0.2); }
+    if ((e.metaKey || e.ctrlKey) && e.key === '-') { e.preventDefault(); zoomBy(-0.2); }
   });
 }
 
+// Every zoom path goes through here, because `reader` is null until a book is open —
+// there's a real window (the upload, which is the longest wait in the app) where the
+// toolbar is on screen and pressing cmd+- would otherwise throw.
+function zoomBy(delta) {
+  if (!reader) return;
+  setZoom(reader.scale + delta);
+}
+
 async function setZoom(s) {
+  if (!reader) return;
   await reader.setScale(s);
   $('#zoom').textContent = Math.round(reader.scale * 100) + '%';
   renderAnnotations();
