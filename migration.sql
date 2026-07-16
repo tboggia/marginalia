@@ -50,6 +50,15 @@ alter table annotations add constraint unit_present check (
 create index if not exists annotations_document_spine_idx
   on annotations (document_id, spine_index) where deleted_at is null;
 
+-- ---------------------------------------------------------------- documents RLS
+-- The document insert returns the new row (PostgREST's return=representation), and
+-- Postgres applies the SELECT policy to that RETURNING clause. The creator's
+-- membership row is written *after* the document row, so a membership-only read
+-- policy rejects every creation with a 403. Let creators see their own documents.
+drop policy if exists read_documents on documents;
+create policy read_documents on documents for select
+  using (is_member(id) or created_by = auth.uid());
+
 -- -------------------------------------------------------------- storage RLS
 -- The original upload policy checked `owner = auth.uid()`, but `owner` is populated
 -- server-side *after* the WITH CHECK runs, so it compared against NULL and rejected

@@ -128,7 +128,13 @@ create or replace function is_member(doc uuid) returns boolean
   )
 $$;
 
-create policy read_documents on documents for select using (is_member(id));
+-- `or created_by`: the insert returns the new row (RETURNING), and Postgres applies
+-- this SELECT policy to that clause — but the creator's membership row is written
+-- *after* the document row, so at that moment is_member() is still false and a
+-- membership-only policy 403s every creation. The creator seeing their own document
+-- is what we want anyway.
+create policy read_documents on documents for select
+  using (is_member(id) or created_by = auth.uid());
 create policy create_documents on documents for insert with check (created_by = auth.uid());
 
 create policy read_members on memberships for select using (is_member(document_id));

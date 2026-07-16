@@ -65,7 +65,21 @@ export class EpubReader {
   }
 
   async load(source) {
-    this.book = this.ePub(source.url ?? source.data.slice(0));
+    // Always hand epub.js bytes, never a URL. Unlike pdf.js there's no streaming to
+    // gain — the whole archive must download before unzipping either way — and
+    // epub.js's type-sniffing misreads a signed URL's `.epub?token=...` as an
+    // *unpacked directory*, then starts requesting META-INF/container.xml and
+    // friends as siblings of the signed path. Fetching ourselves sidesteps its URL
+    // parsing entirely and makes hosted identical to the (verified) local path.
+    let bytes;
+    if (source.url) {
+      const res = await fetch(source.url);
+      if (!res.ok) throw new Error(`The book failed to download (${res.status}).`);
+      bytes = await res.arrayBuffer();
+    } else {
+      bytes = source.data.slice(0);
+    }
+    this.book = this.ePub(bytes);
     await this.book.ready;
     this.pageCount = this.book.spine.length;
 

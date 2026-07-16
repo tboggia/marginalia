@@ -18,7 +18,7 @@ import { toPage } from './geometry.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs';
 
-console.info('Marginalia v 0.0.4');
+console.info('Marginalia v 0.0.5');
 const COLORS = [
   { name: 'amber',   hex: '#E9A13B' },
   { name: 'cyan',    hex: '#3FBFC9' },

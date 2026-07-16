@@ -151,7 +151,7 @@ the terms.
 | Magic link lands on the site root, not the book | The URL isn't in **Redirect URLs**. Add it including the path. |
 | Sign-in works, book list is empty | Uploaded before the membership row was written. Check `memberships`. |
 | Book 404s or hangs on load | Bucket isn't named `books`, or the storage policies didn't run. |
-| EPUB downloads but never renders | epub.js's internal `fetch()` against the signed URL failed — check the browser console for a CORS or content-type error. Unlike pdf.js, epub.js always needs the whole file; there's no range-request path to fall back to. |
+| EPUB downloads but never renders | The fetch of the signed URL failed — check the console for a CORS or 4xx error. The app deliberately downloads the bytes itself and hands epub.js an ArrayBuffer: given a URL ending in `.epub?token=...`, epub.js misreads the query string and treats the book as an unpacked directory, requesting `META-INF/container.xml` from the wrong path. Don't "simplify" it back to passing the URL. |
 | Highlights save but the other person never sees them | Realtime isn't publishing. Re-run the `alter publication` lines. |
 | Realtime works but leaks | `replica identity full` didn't run. Without it the socket ignores RLS. |
 | Invite button does nothing | Not HTTPS. Clipboard needs a secure context; it falls back to a prompt. |
