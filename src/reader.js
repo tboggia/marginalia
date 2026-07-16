@@ -17,6 +17,8 @@ const RENDER_MARGIN = 2; // pages either side of the viewport kept live
 
 export class Reader {
   kind = 'pdf';
+  minScale = 0.5;
+  maxScale = 3;
 
   constructor(container, pdfjsLib) {
     this.container = container;
@@ -163,7 +165,7 @@ export class Reader {
 
   async setScale(scale) {
     const pos = this.position();
-    this.scale = Math.max(0.5, Math.min(3, scale));
+    this.scale = Math.max(this.minScale, Math.min(this.maxScale, scale));
     for (const p of this.pages) {
       p.el.style.width = p.size.w * this.scale + 'px';
       p.el.style.height = p.size.h * this.scale + 'px';

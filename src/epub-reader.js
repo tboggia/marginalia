@@ -29,8 +29,6 @@ import { readEpubSelection } from './epub-anchors.js';
 import { rectToPage, mergeLineRects, quantize } from './geometry.js';
 
 const READ_WIDTH = 760; // px — capped for readability, centered like a PDF page
-const MIN_SCALE = 0.7;
-const MAX_SCALE = 2.2;
 
 function debounce(fn, ms) {
   let t;
@@ -42,6 +40,9 @@ function debounce(fn, ms) {
 
 export class EpubReader {
   kind = 'epub';
+  // "Zoom" here is font size, whose sane range is narrower than pixel zoom's.
+  minScale = 0.7;
+  maxScale = 2.2;
 
   constructor(container, ePub) {
     this.container = container;
@@ -194,7 +195,7 @@ export class EpubReader {
   }
 
   async setScale(n) {
-    this.scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, n));
+    this.scale = Math.max(this.minScale, Math.min(this.maxScale, n));
     this.rendition.themes.fontSize(Math.round(this.scale * 100) + '%');
     const cfi = this._currentCfi;
     if (cfi) await this.goTo({ cfi });

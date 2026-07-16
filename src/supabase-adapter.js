@@ -92,7 +92,7 @@ export class SupabaseStore {
     });
   }
 
-  async putDocument(file, format) {
+  async putDocument(file, format, title) {
     const bytes = await file.arrayBuffer();
     const hash = await sha256(bytes);
 
@@ -121,7 +121,10 @@ export class SupabaseStore {
 
     const { data, error } = await this.sb
       .from('documents')
-      .insert({ title: file.name.replace(/\.(pdf|epub)$/i, ''), storage_path: path, sha256: hash, format })
+      .insert({
+        title: title ?? file.name.replace(/\.(pdf|epub)$/i, ''),
+        storage_path: path, sha256: hash, format,
+      })
       .select().single();
     if (error) throw error;
 

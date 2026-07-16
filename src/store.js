@@ -7,7 +7,7 @@
  *
  * Store interface:
  *   init()                             -> {docId}
- *   putDocument(file, format)          -> {docId, title, format}
+ *   putDocument(file, format, title?)  -> {docId, title, format}
  *   getDocumentSource(docId)           -> {data: ArrayBuffer} | {url: string}
  *   getInviteCode(docId)               -> string | null
  *   listAnnotations(docId)             -> Annotation[]
@@ -118,7 +118,7 @@ export class LocalStore {
     return () => this.listeners.get(docId)?.delete(cb);
   }
 
-  async putDocument(file, format) {
+  async putDocument(file, format, title) {
     const bytes = await file.arrayBuffer();
     const hash = await sha256(bytes);
     const existing = await tx(this.db, ['documents'], 'readonly', (t) =>
@@ -126,7 +126,9 @@ export class LocalStore {
     );
     const doc = existing ?? {
       id: hash,
-      title: file.name.replace(/\.(pdf|epub)$/i, ''),
+      // Caller passes the book's own metadata title when it has one; the filename is
+      // the fallback, not the source of truth.
+      title: title ?? file.name.replace(/\.(pdf|epub)$/i, ''),
       format,
       bytes,
       createdAt: Date.now(),

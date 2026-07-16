@@ -18,7 +18,7 @@ import { toPage } from './geometry.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs';
 
-console.info('Marginalia v 0.0.5');
+console.info('Marginalia v 0.0.6');
 const COLORS = [
   { name: 'amber',   hex: '#E9A13B' },
   { name: 'cyan',    hex: '#3FBFC9' },
@@ -75,6 +75,7 @@ const store = isHosted()
 // Created fresh per doc in openDoc — a session can open a PDF, close it, and open an
 // EPUB (or another PDF) without a reload, so this can't be a single instance anymore.
 let reader = null;
+let unsubscribe = null; // store.subscribe's teardown, held so close/reopen doesn't leak
 
 let docId = null;
 let annotations = [];
@@ -133,7 +134,10 @@ async function boot() {
     me = {
       id: store.user.id,
       name: store.user.user_metadata?.name ?? store.user.email?.split('@')[0] ?? 'You',
-      color: pref('marginalia:color', COLORS[0].hex),
+      // Same key the palette and who-dialog write (uidKey + ':color'). This used to
+      // read 'marginalia:color', which nothing ever wrote — so the picked color
+      // silently reverted to amber on every refresh in hosted mode.
+      color: pref(uidKey + ':color', COLORS[0].hex),
     };
     $('#auth').hidden = true;
   }
@@ -257,6 +261,39 @@ function detectFormat(file) {
   return null;
 }
 
+/**
+ * The book's own metadata beats its filename — files arrive named things like
+ * "Title _ Subtitle -- Author -- Reprint, 2013 -- Publisher -- isbn13 ... .epub".
+ * EPUB carries dc:title/dc:creator in the OPF; PDF has Title/Author in its Info
+ * dictionary. Either can be missing or junk, so the filename stays as the fallback.
+ */
+async function bookTitle(file, format) {
+  try {
+    if (format === 'epub') {
+      const ePub = (await import('https://esm.sh/epubjs@0.3.93')).default;
+      const book = ePub(await file.arrayBuffer());
+      // ready, not just loaded.metadata: destroy() while the rest of the opening
+      // pipeline (navigation, displayOptions) is still in flight throws inside epub.js.
+      await book.ready;
+      const meta = await book.loaded.metadata;
+      book.destroy();
+      const t = meta?.title?.trim();
+      const a = meta?.creator?.trim();
+      if (t) return a ? `${t} — ${a}` : t;
+    } else {
+      const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+      const { info } = await pdf.getMetadata().catch(() => ({ info: {} }));
+      await pdf.destroy();
+      const t = info?.Title?.trim();
+      const a = info?.Author?.trim();
+      if (t) return a ? `${t} — ${a}` : t;
+    }
+  } catch {
+    /* unreadable metadata is not an error — the filename below still works */
+  }
+  return file.name.replace(/\.(pdf|epub)$/i, '');
+}
+
 async function ingest(file) {
   const format = detectFormat(file);
   if (!format) {
@@ -267,7 +304,7 @@ async function ingest(file) {
   // book going up to storage, which is the longest wait in the app.
   showLoading(isHosted() ? 'Uploading…' : 'Opening…');
   try {
-    const { docId: id, title } = await store.putDocument(file, format);
+    const { docId: id, title } = await store.putDocument(file, format, await bookTitle(file, format));
     await openDoc(id, title, format);
   } catch (e) {
     hideLoading();
@@ -279,6 +316,8 @@ async function openDoc(id, title, format = 'pdf') {
   // Also covers reopening from the recent list and landing via an invite link, which
   // don't go through ingest().
   showLoading('Opening…');
+  unsubscribe?.();
+  unsubscribe = null;
   reader?.destroy();
   reader = format === 'epub'
     // Lazy-loaded so a PDF-only session never pays for epub.js/JSZip. esm.sh, not
@@ -290,10 +329,19 @@ async function openDoc(id, title, format = 'pdf') {
   docId = id;
   $('#title').textContent = title;
   $('#start').hidden = true;
+  $('#t-home').disabled = false;
   app.dataset.format = reader.kind;
-  // Ink has no coherent anchor on reflowable text — see README "known gaps". Force
-  // back to select so a tool chosen for the previous book can't get stuck on.
-  if (reader.kind === 'epub' && tool !== 'select') setTool('select');
+  // Ink has no coherent anchor on reflowable text — see README "known gaps". Disabled
+  // rather than hidden: a missing Draw button reads as a bug, a greyed one with this
+  // tooltip reads as a rule. Force back to select so a tool chosen for the previous
+  // book can't get stuck on.
+  const isEpub = reader.kind === 'epub';
+  $('#t-ink').disabled = isEpub;
+  $('#t-erase').disabled = isEpub;
+  $('#t-ink').title = isEpub
+    ? 'Ink needs a fixed page — PDF only' : 'Draw with a stylus (a pen always draws)';
+  $('#t-erase').title = isEpub ? 'Ink needs a fixed page — PDF only' : 'Erase your own ink';
+  if (isEpub && tool !== 'select') setTool('select');
 
   const source = await store.getDocumentSource(id);
   if (!source) {
@@ -327,8 +375,9 @@ async function openDoc(id, title, format = 'pdf') {
     renderSpine();
   };
   reader.renderAnnotations = renderAnnotations;
+  syncZoomUI();
 
-  store.subscribe(id, onRemoteChange);
+  unsubscribe = store.subscribe(id, onRemoteChange);
 
   const mine = progress[me.id];
   if (mine) {
@@ -347,6 +396,38 @@ async function openDoc(id, title, format = 'pdf') {
   renderSpine();
   // Last thing: the overlay hides the half-rendered book until it's actually readable.
   hideLoading();
+}
+
+/** Back to the library. The inverse of openDoc, resetting everything it set. */
+function closeDoc() {
+  unsubscribe?.();
+  unsubscribe = null;
+  reader?.destroy();
+  reader = null;
+  docId = null;
+  annotations = [];
+  members = [];
+  progress = {};
+  closePopover();
+  hideLoading();
+  setTool('select');
+  $('#title').textContent = '';
+  $('#t-home').disabled = true;
+  $('#t-invite').hidden = true;
+  $('#t-ink').disabled = false;
+  $('#t-erase').disabled = false;
+  $('#zoom-in').disabled = true;
+  $('#zoom-out').disabled = true;
+  $('#zoom').textContent = '—';
+  $('#spine-bot').textContent = '—';
+  $('#track').querySelectorAll('.tick, .marker').forEach((n) => n.remove());
+  $('#gap').textContent = '';
+  $('#jump-label').textContent = 'Find them';
+  $('#note-count').textContent = '';
+  $('#notes').innerHTML = '';
+  delete app.dataset.format;
+  $('#start').hidden = false;
+  renderRecent();
 }
 
 /* --------------------------------------------------------- remote changes */
@@ -394,12 +475,13 @@ function setTool(t) {
 }
 
 function bindTools() {
+  $('#t-home').onclick = closeDoc;
   $('#t-select').onclick = () => setTool('select');
   $('#t-ink').onclick = () => setTool('ink');
   $('#t-erase').onclick = () => setTool('erase');
 
-  $('#zoom-in').onclick = () => setZoom(reader.scale + 0.2);
-  $('#zoom-out').onclick = () => setZoom(reader.scale - 0.2);
+  $('#zoom-in').onclick = () => zoomBy(0.2);
+  $('#zoom-out').onclick = () => zoomBy(-0.2);
 
   $('#t-panel').onclick = () => {
     const open = app.dataset.panel === 'open';
@@ -440,8 +522,16 @@ function zoomBy(delta) {
 async function setZoom(s) {
   if (!reader) return;
   await reader.setScale(s);
-  $('#zoom').textContent = Math.round(reader.scale * 100) + '%';
+  syncZoomUI();
   renderAnnotations();
+}
+
+/** Label + button state. Disabled at a limit, so the edge is visible, not silent. */
+function syncZoomUI() {
+  if (!reader) return;
+  $('#zoom').textContent = Math.round(reader.scale * 100) + '%';
+  $('#zoom-out').disabled = reader.scale <= reader.minScale + 1e-6;
+  $('#zoom-in').disabled = reader.scale >= reader.maxScale - 1e-6;
 }
 
 function buildPalette() {
@@ -497,15 +587,13 @@ function bindSelection() {
 function openPopover(sel, x, y) {
   const pop = $('#pop');
   pop.innerHTML = '';
-  for (const c of COLORS) {
-    const b = document.createElement('button');
-    b.className = 'swatch';
-    b.style.background = c.hex;
-    b.style.color = c.hex;
-    b.ariaPressed = String(c.hex === me.color);
-    b.onclick = () => createHighlight(sel, c.hex, false);
-    pop.appendChild(b);
-  }
+  // Your color is a standing preference (the toolbar palette / who-dialog), not a
+  // per-highlight decision — the popover shows it, it doesn't ask.
+  const hl = document.createElement('button');
+  hl.className = 'act';
+  hl.innerHTML = `<span class="dot" style="background:${me.color}"></span>Highlight`;
+  hl.onclick = () => createHighlight(sel, me.color, false);
+  pop.appendChild(hl);
   const note = document.createElement('button');
   note.className = 'act';
   note.textContent = 'Add note';
