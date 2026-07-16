@@ -14,6 +14,10 @@ create table documents (
   title        text not null,
   storage_path text not null,
   page_count   int  not null default 0,
+  format       text not null default 'pdf' check (format in ('pdf', 'epub')),
+  -- Cache of epub.js's book.locations.save() — the character-index walk that backs
+  -- percentageFromCfi/cfiFromPercentage is a full-book pass, worth avoiding on every open.
+  epub_locations jsonb,
   -- If someone re-uploads a different scan of the same book, every stored anchor is
   -- now pointing at the wrong words. Compare this on load and refuse rather than
   -- render 400 highlights in the wrong places.
@@ -36,43 +40,65 @@ create index on memberships (user_id);
 
 -- ----------------------------------------------------------------- progress
 -- One row per person per book. This is the entire "keep my place" feature.
+-- PDF locates with page+y_frac; EPUB has no fixed page, so it locates with a CFI
+-- instead. `percent` is populated by both formats and is what the spine rail and
+-- "how far apart are we" comparisons actually read — see annotations.percent below.
 create table progress (
   document_id uuid not null references documents(id) on delete cascade,
   user_id     uuid not null references auth.users(id) on delete cascade,
-  page        int  not null check (page > 0),
-  y_frac      real not null default 0 check (y_frac >= 0 and y_frac <= 1),
+  page        int,
+  y_frac      real check (y_frac is null or (y_frac >= 0 and y_frac <= 1)),
+  cfi         text,
+  percent     real not null default 0 check (percent >= 0 and percent <= 1),
   updated_at  timestamptz not null default now(),
-  primary key (document_id, user_id)
+  primary key (document_id, user_id),
+  constraint page_check check (page is null or page > 0),
+  constraint progress_locator_matches check (
+    (page is not null and cfi is null) or (page is null and cfi is not null)
+  )
 );
 
 -- -------------------------------------------------------------- annotations
 -- One table for highlights, notes, and ink. The read pattern is always
 -- "everything on page N", and joining three tables for two users is ceremony.
+-- EPUB rows have no page_number (there is no fixed page); they group by spine_index
+-- instead (the chapter/spine-item they belong to — the same coarse role page_number
+-- plays for PDF) and anchor precisely with a cfi rather than rects+text_anchor. Ink is
+-- PDF-only: reflowable text has no fixed geometry for a stroke to stay put against, so
+-- no epub annotation ever has type 'ink'. See README "known gaps".
 create table annotations (
   id          uuid primary key default gen_random_uuid(),
   document_id uuid not null references documents(id) on delete cascade,
   user_id     uuid not null references auth.users(id) on delete cascade default auth.uid(),
-  page_number int  not null check (page_number > 0),
+  page_number int,
+  spine_index int,
   type        text not null check (type in ('highlight', 'ink')),
   color       text not null,
   -- All geometry is normalized to [0,1] against the unrotated page at scale 1.
-  -- No pixel value is ever stored. See PLAN.md §2.
-  rects       jsonb,        -- highlight: [{x,y,w,h}]
-  strokes     jsonb,        -- ink: [{color,width,points:[[x,y,pressure]]}]
+  -- No pixel value is ever stored. See PLAN.md §2. EPUB highlights carry no stored
+  -- rects at all — they're recomputed live from the cfi at render time, since a
+  -- chapter's layout (and therefore any pre-stored rect) changes with font size.
+  rects       jsonb,        -- highlight (pdf): [{x,y,w,h}]
+  strokes     jsonb,        -- ink (pdf only): [{color,width,points:[[x,y,pressure]]}]
   text        text,         -- the quoted sentence, for search and export
-  text_anchor jsonb,        -- {itemStart,offsetStart,itemEnd,offsetEnd}
+  text_anchor jsonb,        -- pdf: {itemStart,offsetStart,itemEnd,offsetEnd}
+  cfi         text,         -- epub: the anchor itself, not a repair channel
+  percent     real,         -- shared spine-rail position, both formats populate it
   note        text not null default '',
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now(),
   -- Soft delete: undo is a column write, and the realtime feed can carry removals.
   deleted_at  timestamptz,
+  constraint page_number_check check (page_number is null or page_number > 0),
+  constraint unit_present check (page_number is not null or spine_index is not null),
   constraint shape_matches_type check (
-    (type = 'highlight' and rects is not null) or
+    (type = 'highlight' and (rects is not null or cfi is not null)) or
     (type = 'ink' and strokes is not null)
   )
 );
 
 create index on annotations (document_id, page_number) where deleted_at is null;
+create index on annotations (document_id, spine_index) where deleted_at is null;
 create index on annotations (document_id, updated_at);
 
 create or replace function touch_updated_at() returns trigger

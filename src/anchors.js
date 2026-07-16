@@ -51,6 +51,11 @@ export function readSelection(root) {
     textAnchor: describeRange(range, pageEl),
     // Anchor the popover to the end of the selection, where the cursor lifted.
     caret: caretPoint(range, pageRect),
+    // Host-page pixel coordinates for popover placement. For PDF this is just the
+    // page's own box; the EPUB equivalent (epub-anchors.js) needs the same field
+    // computed from an iframe's box, since a pointerup inside an iframe reports
+    // iframe-local coordinates, not host-page ones.
+    client: caretClient(range, pageRect),
   };
 }
 
@@ -89,6 +94,14 @@ function caretPoint(range, pageRect) {
     x: (last.right - pageRect.left) / pageRect.width,
     y: (last.bottom - pageRect.top) / pageRect.height,
   };
+}
+
+/** Where the selection ended, in host-page pixels — for placing the popover. */
+function caretClient(range, pageRect) {
+  const rects = range.getClientRects();
+  const last = rects[rects.length - 1];
+  if (!last) return { x: pageRect.left, y: pageRect.top };
+  return { x: last.right, y: last.bottom };
 }
 
 /**

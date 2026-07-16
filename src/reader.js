@@ -16,6 +16,8 @@ import { attachInk, redraw } from './ink.js';
 const RENDER_MARGIN = 2; // pages either side of the viewport kept live
 
 export class Reader {
+  kind = 'pdf';
+
   constructor(container, pdfjsLib) {
     this.container = container;
     this.pdfjsLib = pdfjsLib;
@@ -96,18 +98,30 @@ export class Reader {
 
   _bindScroll() {
     const scroller = this.container.parentElement;
-    scroller.addEventListener(
-      'scroll',
-      () => {
-        this._sync();
-        if (this._restoring) return;
-        clearTimeout(this._progressTimer);
-        // Trailing debounce. Writing on every scroll event would be ~60 writes a
-        // second; writing once when the reader settles is what "my place" means.
-        this._progressTimer = setTimeout(() => this.onProgress(this.position()), 800);
-      },
-      { passive: true }
-    );
+    scroller.removeEventListener('scroll', this._onScroll);
+    this._onScroll = () => {
+      this._sync();
+      if (this._restoring) return;
+      clearTimeout(this._progressTimer);
+      // Trailing debounce. Writing on every scroll event would be ~60 writes a
+      // second; writing once when the reader settles is what "my place" means.
+      this._progressTimer = setTimeout(() => this.onProgress(this.position()), 800);
+    };
+    scroller.addEventListener('scroll', this._onScroll, { passive: true });
+  }
+
+  /**
+   * Tear down observers, listeners, and render tasks. Needed now that a session can
+   * open a PDF, close it, and open an EPUB (or another PDF) without a page reload —
+   * previously `load()` only ever ran once per page load, so nothing accumulated.
+   */
+  destroy() {
+    this._io?.disconnect();
+    this.container.parentElement?.removeEventListener('scroll', this._onScroll);
+    clearTimeout(this._progressTimer);
+    for (const p of this.pages) p.task?.cancel();
+    this.container.innerHTML = '';
+    this.pages = [];
   }
 
   /** Which page is at the top of the viewport, and how far into it are we? */
@@ -117,16 +131,23 @@ export class Reader {
     for (const p of this.pages) {
       const r = p.el.getBoundingClientRect();
       if (r.bottom > top + 1) {
-        return {
-          page: p.num,
-          yFrac: Math.max(0, Math.min(1, (top - r.top) / r.height)),
-        };
+        const page = p.num;
+        const yFrac = Math.max(0, Math.min(1, (top - r.top) / r.height));
+        return { page, yFrac, percent: this.percentFor({ page }) };
       }
     }
-    return { page: this.pageCount, yFrac: 0 };
+    return { page: this.pageCount, yFrac: 0, percent: 1 };
   }
 
-  async goTo(page, yFrac = 0, smooth = false) {
+  /** Where a `{page}` (or a record that has one, like an annotation) sits in the book. */
+  percentFor(locator) {
+    const page = locator.page ?? locator.pageNumber ?? 1;
+    return this.pageCount > 1 ? (page - 1) / (this.pageCount - 1) : 0;
+  }
+
+  /** `locator` is anything with `{page, yFrac}` — a progress row, an annotation, a position(). */
+  async goTo(locator, smooth = false) {
+    const { page, yFrac = 0 } = locator;
     const p = this.pages[Math.max(0, Math.min(this.pageCount, page) - 1)];
     if (!p) return;
     this._restoring = true;
@@ -151,7 +172,7 @@ export class Reader {
       p.task = null;
     }
     await this._sync();
-    await this.goTo(pos.page, pos.yFrac);
+    await this.goTo(pos);
     this.renderAnnotations?.();
   }
 

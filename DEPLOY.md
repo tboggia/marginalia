@@ -78,7 +78,8 @@ Two files in this folder exist for Pages:
 - **`.nojekyll`** — empty, and must stay empty. It's a flag. Pages runs everything
   through Jekyll by default, which silently drops files and folders beginning with `_`.
   Nothing here starts with `_` today; this stops that from becoming a mystery later.
-- **`.gitignore`** — excludes `*.pdf`. Read the comment in it before you override that.
+- **`.gitignore`** — excludes `*.pdf` and `*.epub`. Read the comment in it before you
+  override that.
 
 ### The subpath is already handled
 
@@ -100,9 +101,9 @@ RLS is what actually stops strangers reading your margin.
 
 What a public repo *does* change:
 
-- **Never commit the book.** `.gitignore` covers it. A public repo makes a committed PDF
-  a copyrighted book published to the internet under your name, and git history keeps it
-  after you delete the file. Books go in the Supabase bucket.
+- **Never commit the book.** `.gitignore` covers PDF and EPUB. A public repo makes a
+  committed book a copyrighted work published to the internet under your name, and git
+  history keeps it after you delete the file. Books go in the Supabase bucket.
 - **Never commit `service_role`.** Same reason, much worse. It bypasses RLS. If it ever
   lands in a public repo, rotate it in Supabase immediately — scrubbing the history is
   not enough, because public repos are scraped for keys within minutes.
@@ -134,7 +135,7 @@ the terms.
 
 ## 3. Reading together
 
-1. You sign in, upload the PDF, hit **Invite**, and send the link.
+1. You sign in, upload the PDF or EPUB, hit **Invite**, and send the link.
 2. Your partner opens it, signs in, and lands in the book.
 3. The link is now spent. `join_document` caps a book at two readers, so a leaked
    link opens nothing once you're both in. If a link leaks *before* they use it,
@@ -149,7 +150,8 @@ the terms.
 |---|---|
 | Magic link lands on the site root, not the book | The URL isn't in **Redirect URLs**. Add it including the path. |
 | Sign-in works, book list is empty | Uploaded before the membership row was written. Check `memberships`. |
-| PDF 404s or hangs on load | Bucket isn't named `books`, or the storage policies didn't run. |
+| Book 404s or hangs on load | Bucket isn't named `books`, or the storage policies didn't run. |
+| EPUB downloads but never renders | epub.js's internal `fetch()` against the signed URL failed — check the browser console for a CORS or content-type error. Unlike pdf.js, epub.js always needs the whole file; there's no range-request path to fall back to. |
 | Highlights save but the other person never sees them | Realtime isn't publishing. Re-run the `alter publication` lines. |
 | Realtime works but leaks | `replica identity full` didn't run. Without it the socket ignores RLS. |
 | Invite button does nothing | Not HTTPS. Clipboard needs a secure context; it falls back to a prompt. |

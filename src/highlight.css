@@ -1,0 +1,25 @@
+/*
+ * highlight.css — the highlight-layer rules, shared between the host page (where a
+ * PDF page's `.hl-layer` sits under the text layer, positioned by `.page > div` in
+ * index.html) and every EPUB chapter iframe (where epub-reader.js injects this file
+ * directly and appends `.hl-layer` to the chapter's own <body>, so the rule needs to
+ * be able to position itself with no ancestor's help).
+ */
+.hl-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  mix-blend-mode: multiply;
+}
+
+.hl {
+  position: absolute;
+  border-radius: 1.5px;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.hl.has-note {
+  border-bottom: 1.5px solid currentColor;
+}

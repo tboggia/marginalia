@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Marginalia</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230E1116'/%3E%3Ccircle cx='16' cy='10' r='4' fill='%23E9A13B'/%3E%3Ccircle cx='16' cy='22' r='3' fill='%233FBFC9'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./src/highlight.css">
 <style>
   /* ---------------------------------------------------------------
      Design tokens.
@@ -89,6 +90,10 @@
   .tool[aria-pressed="true"] { background: var(--raised); color: var(--text); box-shadow: inset 0 0 0 1px var(--rule); }
   .tool svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
+  /* No ink on reflowable text — see README "known gaps" — so these are PDF-only. */
+  #app[data-format="epub"] #t-ink,
+  #app[data-format="epub"] #t-erase { display: none; }
+
   #zoom { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 4ch; text-align: center; }
 
   /* swatches */
@@ -165,7 +170,6 @@
   }
   .page > canvas, .page > div { position: absolute; inset: 0; }
   canvas.pdf { z-index: 1; }
-  .hl-layer  { z-index: 2; pointer-events: none; mix-blend-mode: multiply; }
   .text-layer{ z-index: 3; overflow: hidden; line-height: 1; text-size-adjust: none; }
   canvas.ink { z-index: 4; touch-action: pan-y; }
   .page-num {
@@ -181,12 +185,6 @@
   .text-layer ::selection { background: rgba(63,191,201,.35); }
   #app[data-ink="on"] .text-layer { pointer-events: none; }
   #app[data-ink="on"] canvas.ink { touch-action: pan-y; cursor: crosshair; }
-
-  .hl {
-    position: absolute; border-radius: 1.5px;
-    pointer-events: auto; cursor: pointer;
-  }
-  .hl.has-note { border-bottom: 1.5px solid currentColor; }
 
   /* ---------------------------------------------------------------- popover */
   #pop {
@@ -403,9 +401,9 @@
 <div id="start">
   <div id="drop">
     <h1>Open a book</h1>
-    <p>Drop a DRM-free PDF here, or choose a file. It stays on this device until you connect a backend.</p>
-    <button class="btn primary" id="pick">Choose a PDF</button>
-    <input type="file" id="file" accept="application/pdf" hidden>
+    <p>Drop a DRM-free PDF or EPUB here, or choose a file. It stays on this device until you connect a backend.</p>
+    <button class="btn primary" id="pick">Choose a book</button>
+    <input type="file" id="file" accept="application/pdf,application/epub+zip,.pdf,.epub" hidden>
     <div id="recent"></div>
   </div>
 </div>

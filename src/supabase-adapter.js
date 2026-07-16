@@ -24,12 +24,15 @@ const toCamel = (r) => ({
   docId: r.document_id,
   userId: r.user_id,
   pageNumber: r.page_number,
+  spineIndex: r.spine_index,
   type: r.type,
   color: r.color,
   rects: r.rects,
   strokes: r.strokes,
   text: r.text,
   textAnchor: r.text_anchor,
+  cfi: r.cfi,
+  percent: r.percent,
   note: r.note,
   createdAt: Date.parse(r.created_at),
   updatedAt: Date.parse(r.updated_at),
@@ -39,13 +42,16 @@ const toCamel = (r) => ({
 const toSnake = (a) => ({
   id: a.id,
   document_id: a.docId,
-  page_number: a.pageNumber,
+  page_number: a.pageNumber ?? null,
+  spine_index: a.spineIndex ?? null,
   type: a.type,
   color: a.color,
   rects: a.rects ?? null,
   strokes: a.strokes ?? null,
   text: a.text ?? null,
   text_anchor: a.textAnchor ?? null,
+  cfi: a.cfi ?? null,
+  percent: a.percent ?? null,
   note: a.note ?? '',
   deleted_at: a.deletedAt ? new Date(a.deletedAt).toISOString() : null,
   // user_id is deliberately omitted. The column defaults to auth.uid() and the RLS
@@ -82,26 +88,28 @@ export class SupabaseStore {
     });
   }
 
-  async putDocument(file) {
+  async putDocument(file, format) {
     const bytes = await file.arrayBuffer();
     const hash = await sha256(bytes);
 
     const { data: found } = await this.sb
       .from('documents').select('*').eq('sha256', hash).maybeSingle();
-    if (found) return { docId: found.id, title: found.title, storagePath: found.storage_path };
+    if (found) {
+      return { docId: found.id, title: found.title, format: found.format, storagePath: found.storage_path };
+    }
 
-    const path = `${this.user.id}/${hash}.pdf`;
+    const path = `${this.user.id}/${hash}.${format}`;
     const up = await this.sb.storage.from('books').upload(path, file, { upsert: true });
     if (up.error) throw up.error;
 
     const { data, error } = await this.sb
       .from('documents')
-      .insert({ title: file.name.replace(/\.pdf$/i, ''), storage_path: path, sha256: hash })
+      .insert({ title: file.name.replace(/\.(pdf|epub)$/i, ''), storage_path: path, sha256: hash, format })
       .select().single();
     if (error) throw error;
 
     await this.saveMember(data.id, { userId: this.user.id, name: 'You', color: '#E9A13B' });
-    return { docId: data.id, title: data.title, storagePath: path };
+    return { docId: data.id, title: data.title, format: data.format, storagePath: path };
   }
 
   /**
@@ -120,9 +128,9 @@ export class SupabaseStore {
 
   async listDocuments() {
     const { data } = await this.sb
-      .from('documents').select('id,title,created_at').order('created_at', { ascending: false });
+      .from('documents').select('id,title,format,created_at').order('created_at', { ascending: false });
     return (data ?? []).map((d) => ({
-      id: d.id, title: d.title, createdAt: Date.parse(d.created_at),
+      id: d.id, title: d.title, format: d.format, createdAt: Date.parse(d.created_at),
     }));
   }
 
@@ -182,6 +190,7 @@ export class SupabaseStore {
     for (const p of data ?? []) {
       out[p.user_id] = {
         userId: p.user_id, page: p.page, yFrac: p.y_frac,
+        cfi: p.cfi, percent: p.percent,
         updatedAt: Date.parse(p.updated_at),
       };
     }
@@ -191,7 +200,8 @@ export class SupabaseStore {
   async saveProgress(docId, userId, p) {
     await this.sb.from('progress').upsert({
       document_id: docId, user_id: userId,
-      page: p.page, y_frac: p.yFrac,
+      page: p.page ?? null, y_frac: p.yFrac ?? null,
+      cfi: p.cfi ?? null, percent: p.percent ?? 0,
       updated_at: new Date().toISOString(),
     });
   }
@@ -221,6 +231,7 @@ export class SupabaseStore {
         (p) => cb({
           kind: 'progress',
           row: { userId: p.new.user_id, page: p.new.page, yFrac: p.new.y_frac,
+                 cfi: p.new.cfi, percent: p.new.percent,
                  updatedAt: Date.parse(p.new.updated_at) },
         }))
       .on('postgres_changes',

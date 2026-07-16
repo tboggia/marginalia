@@ -7,7 +7,7 @@
  *
  * Store interface:
  *   init()                             -> {docId}
- *   putDocument(file)                  -> {docId, title}
+ *   putDocument(file, format)          -> {docId, title, format}
  *   getDocumentSource(docId)           -> {data: ArrayBuffer} | {url: string}
  *   getInviteCode(docId)               -> string | null
  *   listAnnotations(docId)             -> Annotation[]
@@ -118,7 +118,7 @@ export class LocalStore {
     return () => this.listeners.get(docId)?.delete(cb);
   }
 
-  async putDocument(file) {
+  async putDocument(file, format) {
     const bytes = await file.arrayBuffer();
     const hash = await sha256(bytes);
     const existing = await tx(this.db, ['documents'], 'readonly', (t) =>
@@ -126,7 +126,8 @@ export class LocalStore {
     );
     const doc = existing ?? {
       id: hash,
-      title: file.name.replace(/\.pdf$/i, ''),
+      title: file.name.replace(/\.(pdf|epub)$/i, ''),
+      format,
       bytes,
       createdAt: Date.now(),
     };
@@ -135,7 +136,7 @@ export class LocalStore {
         t.objectStore('documents').put(doc)
       );
     }
-    return { docId: doc.id, title: doc.title, bytes: doc.bytes };
+    return { docId: doc.id, title: doc.title, format: doc.format, bytes: doc.bytes };
   }
 
   async listDocuments() {
@@ -143,7 +144,7 @@ export class LocalStore {
       wrap(t.objectStore('documents').getAll())
     ).then((docs) =>
       docs
-        .map(({ id, title, createdAt }) => ({ id, title, createdAt }))
+        .map(({ id, title, format, createdAt }) => ({ id, title, format, createdAt }))
         .sort((a, b) => b.createdAt - a.createdAt)
     );
   }

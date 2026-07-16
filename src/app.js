@@ -8,6 +8,7 @@
 
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs';
 import { Reader } from './reader.js';
+import { EpubReader } from './epub-reader.js';
 import { LocalStore, newId } from './store.js';
 import { config, isHosted } from './config.js';
 import { readSelection, hitTest } from './anchors.js';
@@ -70,7 +71,9 @@ const store = isHosted()
     })()
   : new LocalStore();
 
-const reader = new Reader($('#pages'), pdfjsLib);
+// Created fresh per doc in openDoc — a session can open a PDF, close it, and open an
+// EPUB (or another PDF) without a reload, so this can't be a single instance anymore.
+let reader = null;
 
 let docId = null;
 let annotations = [];
@@ -85,6 +88,19 @@ const colorOf = (userId) =>
 const nameOf = (userId) =>
   userId === me.id ? me.name : members.find((m) => m.userId === userId)?.name ?? 'Them';
 const other = () => members.find((m) => m.userId !== me.id) ?? null;
+
+// PDF annotations group by page number; EPUB has no fixed page, so they group by
+// spine index instead — the same coarse "which chunk of the book" role, different unit.
+const unitKey = (a) => a.pageNumber ?? a.spineIndex;
+// A human position label: an exact page for PDF, a rounded percent-through-book for EPUB.
+const posLabel = (p) => (p.page != null ? `p.${p.page}` : `${Math.round((p.percent ?? 0) * 100)}%`);
+// What reader.goTo() needs, read off an annotation record. Each reader implementation
+// only looks at the fields that apply to its own format (page/yFrac vs cfi).
+const locatorFor = (a) => ({
+  page: a.pageNumber,
+  yFrac: a.rects?.[0] ? Math.max(0, a.rects[0].y - 0.12) : 0,
+  cfi: a.cfi,
+});
 
 function toast(msg) {
   const t = $('#toast');
@@ -164,7 +180,8 @@ async function handleInviteLink() {
     // the URL in the address bar stops being a live credential.
     history.replaceState({}, '', location.pathname);
     const docs = await store.listDocuments();
-    await openDoc(id, docs.find((d) => d.id === id)?.title ?? 'Shared book');
+    const doc = docs.find((d) => d.id === id);
+    await openDoc(id, doc?.title ?? 'Shared book', doc?.format);
     toast('You\u2019re in.');
   } catch (e) {
     toast(e.message);
@@ -194,7 +211,7 @@ async function renderRecent() {
     const b = document.createElement('button');
     b.className = 'recent-item';
     b.innerHTML = `<span style="color:var(--muted)">${escape(d.title)}</span><span>reopen</span>`;
-    b.onclick = () => openDoc(d.id, d.title);
+    b.onclick = () => openDoc(d.id, d.title, d.format);
     el.appendChild(b);
   }
 }
@@ -222,19 +239,36 @@ function bindStart() {
   });
 }
 
-async function ingest(file) {
-  if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
-    toast('That file is not a PDF.');
-    return;
-  }
-  const { docId: id, title } = await store.putDocument(file);
-  await openDoc(id, title);
+function detectFormat(file) {
+  if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) return 'pdf';
+  if (file.type === 'application/epub+zip' || /\.epub$/i.test(file.name)) return 'epub';
+  return null;
 }
 
-async function openDoc(id, title) {
+async function ingest(file) {
+  const format = detectFormat(file);
+  if (!format) {
+    toast('That file isn’t a PDF or EPUB.');
+    return;
+  }
+  const { docId: id, title } = await store.putDocument(file, format);
+  await openDoc(id, title, format);
+}
+
+async function openDoc(id, title, format = 'pdf') {
+  reader?.destroy();
+  reader = format === 'epub'
+    // Lazy-loaded so a PDF-only session never pays for epub.js/JSZip.
+    ? new EpubReader($('#pages'), (await import('https://cdn.jsdelivr.net/npm/epubjs@0.3.93/+esm')).default)
+    : new Reader($('#pages'), pdfjsLib);
+
   docId = id;
   $('#title').textContent = title;
   $('#start').hidden = true;
+  app.dataset.format = reader.kind;
+  // Ink has no coherent anchor on reflowable text — see README "known gaps". Force
+  // back to select so a tool chosen for the previous book can't get stuck on.
+  if (reader.kind === 'epub' && tool !== 'select') setTool('select');
 
   const source = await store.getDocumentSource(id);
   if (!source) {
@@ -256,6 +290,7 @@ async function openDoc(id, title) {
 
   reader.getInkState = () => ({ inkMode: tool === 'ink', color: me.color });
   reader.onInkCommit = commitStroke;
+  reader.onSelectionChange = handleSelection;
   reader.onProgress = async (p) => {
     await store.saveProgress(docId, me.id, p);
     progress[me.id] = { ...p, userId: me.id, updatedAt: Date.now() };
@@ -267,14 +302,15 @@ async function openDoc(id, title) {
 
   const mine = progress[me.id];
   if (mine) {
-    await reader.goTo(mine.page, mine.yFrac);
-    toast(`Back on page ${mine.page}.`);
+    await reader.goTo(mine);
+    toast(mine.page != null ? `Back on page ${mine.page}.` : `Back where you left off — ${posLabel(mine)} through.`);
   } else {
     // Opening the book is itself a position. Without this, a reader who hasn't
     // scrolled yet has no progress row, so they're invisible on the other person's
     // spine — they've opened the book and their partner can't tell.
-    await store.saveProgress(id, me.id, { page: 1, yFrac: 0 });
-    progress[me.id] = { userId: me.id, page: 1, yFrac: 0, updatedAt: Date.now() };
+    const initial = reader.position();
+    await store.saveProgress(id, me.id, initial);
+    progress[me.id] = { ...initial, userId: me.id, updatedAt: Date.now() };
   }
   renderAnnotations();
   renderPanel();
@@ -294,7 +330,8 @@ function onRemoteChange(change) {
     } else {
       annotations.push(change.row);
       if (change.row.userId !== me.id) {
-        toast(`${nameOf(change.row.userId)} marked up page ${change.row.pageNumber}.`);
+        const where = posLabel({ page: change.row.pageNumber, percent: change.row.percent });
+        toast(`${nameOf(change.row.userId)} marked up ${where}.`);
       }
     }
     renderAnnotations();
@@ -316,17 +353,18 @@ function onRemoteChange(change) {
 }
 
 /* ------------------------------------------------------------------- tools */
+function setTool(t) {
+  tool = t;
+  app.dataset.ink = t === 'ink' ? 'on' : 'off';
+  $('#t-select').ariaPressed = String(t === 'select');
+  $('#t-ink').ariaPressed = String(t === 'ink');
+  $('#t-erase').ariaPressed = String(t === 'erase');
+}
+
 function bindTools() {
-  const set = (t) => {
-    tool = t;
-    app.dataset.ink = t === 'ink' ? 'on' : 'off';
-    $('#t-select').ariaPressed = String(t === 'select');
-    $('#t-ink').ariaPressed = String(t === 'ink');
-    $('#t-erase').ariaPressed = String(t === 'erase');
-  };
-  $('#t-select').onclick = () => set('select');
-  $('#t-ink').onclick = () => set('ink');
-  $('#t-erase').onclick = () => set('erase');
+  $('#t-select').onclick = () => setTool('select');
+  $('#t-ink').onclick = () => setTool('ink');
+  $('#t-erase').onclick = () => setTool('erase');
 
   $('#zoom-in').onclick = () => setZoom(reader.scale + 0.2);
   $('#zoom-out').onclick = () => setZoom(reader.scale - 0.2);
@@ -341,7 +379,7 @@ function bindTools() {
     const o = other();
     const p = o && progress[o.userId];
     if (!p) return toast('Nobody else has opened this book yet.');
-    reader.goTo(p.page, p.yFrac, true);
+    reader.goTo(p, true);
   };
 
   $('#t-who').onclick = openWhoDialog;
@@ -349,9 +387,10 @@ function bindTools() {
 
   document.addEventListener('keydown', (e) => {
     if (e.target.matches('input, textarea')) return;
-    if (e.key === 'v') set('select');
-    if (e.key === 'd') set('ink');
-    if (e.key === 'e') set('erase');
+    if (e.key === 'v') setTool('select');
+    // No ink on reflowable text — see README "known gaps" — so these are PDF-only.
+    if (e.key === 'd' && reader?.kind !== 'epub') setTool('ink');
+    if (e.key === 'e' && reader?.kind !== 'epub') setTool('erase');
     if (e.key === 'Escape') closePopover();
     if ((e.metaKey || e.ctrlKey) && e.key === '=') { e.preventDefault(); setZoom(reader.scale + 0.2); }
     if ((e.metaKey || e.ctrlKey) && e.key === '-') { e.preventDefault(); setZoom(reader.scale - 0.2); }
@@ -385,20 +424,23 @@ function buildPalette() {
 }
 
 /* -------------------------------------------------------------- highlights */
+function handleSelection(sel) {
+  if (!sel) return closePopover();
+  if (sel.crossPage) {
+    closePopover();
+    return toast('Highlights stop at the page edge — select within one page.');
+  }
+  pending = sel;
+  openPopover(sel, sel.client.x, sel.client.y);
+}
+
 function bindSelection() {
   document.addEventListener('pointerup', (e) => {
-    if (tool !== 'select' || e.pointerType === 'pen') return;
-    // Let the browser finish resolving the selection before reading it.
-    setTimeout(() => {
-      const sel = readSelection(document);
-      if (!sel) return closePopover();
-      if (sel.crossPage) {
-        closePopover();
-        return toast('Highlights stop at the page edge — select within one page.');
-      }
-      pending = sel;
-      openPopover(sel, e.clientX, e.clientY);
-    }, 0);
+    if (tool !== 'select' || e.pointerType === 'pen' || reader?.kind === 'epub') return;
+    // Let the browser finish resolving the selection before reading it. EPUB never
+    // reaches here — a pointerup inside a chapter's iframe doesn't bubble to this
+    // top-document listener, so it arrives via reader.onSelectionChange instead.
+    setTimeout(() => handleSelection(readSelection(document)), 0);
   });
 
   $('#pages').addEventListener('pointerdown', (e) => {
@@ -450,16 +492,20 @@ async function createHighlight(sel, color, withNote) {
     docId,
     userId: me.id,
     type: 'highlight',
-    pageNumber: sel.pageNumber,
+    pageNumber: sel.pageNumber ?? null,
+    spineIndex: sel.spineIndex ?? null,
     color,
-    rects: sel.rects,
+    rects: sel.rects ?? null,
+    cfi: sel.cfi ?? null,
+    percent: reader.percentFor(sel),
     text: sel.text,
-    textAnchor: sel.textAnchor,
+    textAnchor: sel.textAnchor ?? null,
     note: '',
   });
-  getSelection()?.removeAllRanges();
+  // For EPUB the live selection is in a chapter iframe's own window, not this one.
+  reader.pageEl(unitKey(sel))?.ownerDocument?.defaultView?.getSelection()?.removeAllRanges();
   closePopover();
-  renderAnnotations(sel.pageNumber);
+  renderAnnotations(unitKey(sel));
   renderPanel();
   renderSpine();
   if (withNote) openNoteDialog(a);
@@ -474,6 +520,7 @@ async function commitStroke(pageNumber, stroke) {
     pageNumber,
     color: stroke.color,
     strokes: [stroke],
+    percent: reader.percentFor({ pageNumber }),
     note: '',
   });
   void a;
@@ -497,16 +544,21 @@ async function erase(pageNumber, pt) {
 
 /* ---------------------------------------------------------------- painting */
 function renderAnnotations(only) {
-  const pageNums = only ? [only] : reader.pages.map((p) => p.num);
+  // `only != null` rather than truthy: spine index 0 (an EPUB book's first chapter)
+  // is a legitimate unit key and must not fall through to "render everything."
+  const pageNums = only != null ? [only] : reader.pages.map((p) => p.num);
   for (const n of pageNums) {
     const el = reader.pageEl(n);
     if (!el) continue;
-    const mine = annotations.filter((a) => a.pageNumber === n);
+    const mine = annotations.filter((a) => unitKey(a) === n);
 
     const hl = el.querySelector('.hl-layer');
     hl.innerHTML = '';
     for (const a of mine.filter((a) => a.type === 'highlight')) {
-      for (const r of a.rects) {
+      // PDF annotations carry their own rects; EPUB ones carry a cfi and get their
+      // rects resolved fresh against however the chapter is laid out right now.
+      const rects = a.rects ?? reader.rectsForCfi?.(n, a.cfi) ?? [];
+      for (const r of rects) {
         const d = document.createElement('div');
         d.className = 'hl' + (a.note ? ' has-note' : '');
         d.style.cssText =
@@ -519,7 +571,7 @@ function renderAnnotations(only) {
     }
 
     const ink = el.querySelector('canvas.ink');
-    if (ink.width) {
+    if (ink?.width) {
       redraw(ink, mine.filter((a) => a.type === 'ink').flatMap((a) => a.strokes ?? []));
     }
   }
@@ -534,7 +586,7 @@ function renderAnnotations(only) {
 function renderPanel() {
   const notes = annotations
     .filter((a) => a.type === 'highlight')
-    .sort((a, b) => a.pageNumber - b.pageNumber);
+    .sort((a, b) => (a.percent ?? 0) - (b.percent ?? 0));
   const withText = notes.filter((a) => a.note);
   $('#note-count').textContent = notes.length ? `${notes.length}` : '';
 
@@ -551,10 +603,10 @@ function renderPanel() {
     div.style.color = colorOf(a.userId);
     div.innerHTML =
       `<div class="note-meta"><span class="note-who">${escape(nameOf(a.userId))}</span>` +
-      `<span>p.${a.pageNumber}</span></div>` +
+      `<span>${posLabel({ page: a.pageNumber, percent: a.percent })}</span></div>` +
       (a.text ? `<div class="note-quote">${escape(a.text)}</div>` : '') +
       (a.note ? `<div class="note-body">${escape(a.note)}</div>` : '');
-    div.onclick = () => reader.goTo(a.pageNumber, Math.max(0, a.rects[0].y - 0.12), true);
+    div.onclick = () => reader.goTo(locatorFor(a), true);
     el.appendChild(div);
   }
   void withText;
@@ -563,15 +615,15 @@ function renderPanel() {
 /* ------------------------------------------------------------------- spine */
 function renderSpine() {
   const track = $('#track');
-  const total = reader.pageCount || 1;
-  const frac = (page) => (total > 1 ? (page - 1) / (total - 1) : 0);
-
+  // Every record — PDF or EPUB — carries its own `percent` through the book, stamped
+  // at write time by whichever reader created it (see reader.percentFor). The rail
+  // just paints that; it doesn't need to know page counts or CFIs to do its job.
   track.querySelectorAll('.tick, .marker').forEach((n) => n.remove());
 
   for (const a of annotations) {
     const t = document.createElement('div');
     t.className = 'tick';
-    t.style.top = frac(a.pageNumber) * 100 + '%';
+    t.style.top = (a.percent ?? 0) * 100 + '%';
     t.style.background = colorOf(a.userId);
     track.appendChild(t);
   }
@@ -581,11 +633,11 @@ function renderSpine() {
     const m = document.createElement('button');
     const isMe = p.userId === me.id;
     m.className = 'marker' + (isMe ? '' : ' them');
-    m.style.top = frac(p.page) * 100 + '%';
+    m.style.top = (p.percent ?? 0) * 100 + '%';
     m.style.background = colorOf(p.userId);
-    m.textContent = isMe ? String(p.page) : '';
-    m.title = `${nameOf(p.userId)} — page ${p.page}`;
-    m.onclick = () => reader.goTo(p.page, p.yFrac, true);
+    m.textContent = isMe ? posLabel(p) : '';
+    m.title = `${nameOf(p.userId)} — ${posLabel(p)}`;
+    m.onclick = () => reader.goTo(p, true);
     track.appendChild(m);
   }
 
@@ -596,17 +648,20 @@ function renderSpine() {
   const theirs = o && progress[o.userId];
   const gap = $('#gap');
   const jump = $('#jump-label');
+  const together = !!(mine && theirs &&
+    (mine.page != null ? mine.page === theirs.page : mine.cfi === theirs.cfi));
   // The label only needs to know where they are. The gap needs both of you.
   jump.textContent = theirs
-    ? mine && mine.page === theirs.page
-      ? 'Together'
-      : `${nameOf(o.userId)} · p.${theirs.page}`
+    ? together ? 'Together' : `${nameOf(o.userId)} · ${posLabel(theirs)}`
     : 'Find them';
 
   if (mine && theirs) {
-    const d = Math.abs(mine.page - theirs.page);
-    gap.textContent = d === 0 ? 'together' : `${d}p`;
-    const mid = (frac(mine.page) + frac(theirs.page)) / 2;
+    const usingPages = mine.page != null && theirs.page != null;
+    const d = usingPages
+      ? Math.abs(mine.page - theirs.page)
+      : Math.abs((mine.percent ?? 0) - (theirs.percent ?? 0));
+    gap.textContent = d === 0 ? 'together' : usingPages ? `${d}p` : `${Math.round(d * 100)}%`;
+    const mid = ((mine.percent ?? 0) + (theirs.percent ?? 0)) / 2;
     gap.style.top = `calc(40px + ${mid} * (100% - 80px) - 5px)`;
   } else {
     gap.textContent = '';
@@ -617,7 +672,9 @@ function renderSpine() {
 function openNoteDialog(a) {
   editing = a;
   const dlg = $('#note-dlg');
-  $('#note-quote').textContent = a.text ? `"${a.text.slice(0, 180)}"` : `Page ${a.pageNumber}`;
+  $('#note-quote').textContent = a.text
+    ? `"${a.text.slice(0, 180)}"`
+    : a.pageNumber != null ? `Page ${a.pageNumber}` : `${Math.round((a.percent ?? 0) * 100)}% through`;
   const ta = $('#note-text');
   ta.value = a.note ?? '';
   const own = a.userId === me.id;
@@ -637,12 +694,12 @@ function bindNoteDialog() {
 
     if (dlg.returnValue === 'save') {
       await store.saveAnnotation({ ...a, note: $('#note-text').value.trim() });
-      renderAnnotations(a.pageNumber);
+      renderAnnotations(unitKey(a));
       renderPanel();
     }
     if (dlg.returnValue === 'delete') {
       await store.deleteAnnotation(a.id);
-      renderAnnotations(a.pageNumber);
+      renderAnnotations(unitKey(a));
       renderPanel();
       renderSpine();
     }
