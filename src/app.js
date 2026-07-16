@@ -110,6 +110,17 @@ function toast(msg) {
   t._timer = setTimeout(() => (t.dataset.show = 'false'), 2600);
 }
 
+/* Opening a book is the one genuinely slow thing in the app: a hosted upload of a
+   10MB file, then pdf.js parsing it or epub.js walking the whole spine to build the
+   locations index. Without this the UI just sits there looking broken. */
+function showLoading(msg) {
+  $('#loading-msg').textContent = msg;
+  $('#loading').hidden = false;
+}
+function hideLoading() {
+  $('#loading').hidden = true;
+}
+
 /* -------------------------------------------------------------------- boot */
 async function boot() {
   await store.init();
@@ -251,11 +262,22 @@ async function ingest(file) {
     toast('That file isn’t a PDF or EPUB.');
     return;
   }
-  const { docId: id, title } = await store.putDocument(file, format);
-  await openDoc(id, title, format);
+  // Locally this is an IndexedDB write and effectively instant; hosted, it's the whole
+  // book going up to storage, which is the longest wait in the app.
+  showLoading(isHosted() ? 'Uploading…' : 'Opening…');
+  try {
+    const { docId: id, title } = await store.putDocument(file, format);
+    await openDoc(id, title, format);
+  } catch (e) {
+    hideLoading();
+    toast(e.message ?? 'That book didn’t upload.');
+  }
 }
 
 async function openDoc(id, title, format = 'pdf') {
+  // Also covers reopening from the recent list and landing via an invite link, which
+  // don't go through ingest().
+  showLoading('Opening…');
   reader?.destroy();
   reader = format === 'epub'
     // Lazy-loaded so a PDF-only session never pays for epub.js/JSZip. esm.sh, not
@@ -274,6 +296,7 @@ async function openDoc(id, title, format = 'pdf') {
 
   const source = await store.getDocumentSource(id);
   if (!source) {
+    hideLoading();
     toast('That book is no longer on this device.');
     $('#start').hidden = false;
     return;
@@ -287,6 +310,10 @@ async function openDoc(id, title, format = 'pdf') {
     store.getProgress(id),
   ]);
 
+  // EPUB pays for its position model up front: book.locations.generate() walks the
+  // entire spine before the first page can be shown. Worth naming, since it's the
+  // longest wait after the upload.
+  showLoading(reader.kind === 'epub' ? 'Preparing the book…' : 'Opening…');
   const count = await reader.load(source);
   $('#spine-bot').textContent = String(count);
 
@@ -317,6 +344,8 @@ async function openDoc(id, title, format = 'pdf') {
   renderAnnotations();
   renderPanel();
   renderSpine();
+  // Last thing: the overlay hides the half-rendered book until it's actually readable.
+  hideLoading();
 }
 
 /* --------------------------------------------------------- remote changes */

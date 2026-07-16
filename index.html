@@ -288,6 +288,31 @@
   .recent-item:hover { background: var(--raised); color: var(--text); }
   .recent-item span { font: 500 10px var(--mono); color: var(--faint); }
 
+  /* --------------------------------------------------------------- loading
+     Covers the reading area from the moment a file is picked until the book
+     has actually rendered. Uploading a 10MB book and, for EPUB, walking the
+     whole spine to build the locations index are both multi-second waits that
+     otherwise look like nothing happened.                                    */
+  #loading {
+    position: absolute; inset: var(--top-h) 0 0 var(--spine-w);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px;
+    background: var(--ink); z-index: 30;
+  }
+  #loading[hidden] { display: none; }
+  #loading .spinner {
+    width: 28px; height: 28px; border-radius: 50%;
+    border: 2.5px solid var(--rule); border-top-color: var(--c-cyan);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading-msg { font-size: 12.5px; color: var(--muted); }
+  /* The global reduced-motion rule kills the spin, which would leave a static
+     ring reading as broken rather than busy. Drop it and let the text speak. */
+  @media (prefers-reduced-motion: reduce) {
+    #loading .spinner { display: none; }
+  }
+
   #auth {
     position: fixed; inset: 0; z-index: 50;
     display: grid; place-items: center; background: var(--ink);
@@ -390,7 +415,7 @@
 
 <div id="auth" hidden>
   <div class="card">
-    <h1>Marginalia v 0.0.2</h1>
+    <h1>Marginalia v 0.0.3</h1>
     <p id="auth-lede">Sign in and your books, your place, and your margin follow you to any device.</p>
     <input type="email" id="auth-email" placeholder="you@example.com" autocomplete="email">
     <button class="btn primary" id="auth-go" style="width:100%;margin-top:10px;height:34px">Email me a link</button>
@@ -406,6 +431,11 @@
     <input type="file" id="file" accept="application/pdf,application/epub+zip,.pdf,.epub" hidden>
     <div id="recent"></div>
   </div>
+</div>
+
+<div id="loading" hidden>
+  <div class="spinner"></div>
+  <div id="loading-msg">Opening…</div>
 </div>
 
 <dialog id="note-dlg"><form method="dialog" class="dlg">
