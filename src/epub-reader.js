@@ -220,6 +220,26 @@ export class EpubReader {
     if (cfi) await this.goTo({ cfi });
   }
 
+  /**
+   * The box a chapter's normalized rects are fractions of: the chapter <body>'s padding
+   * box, because that is what `.hl-layer { position:absolute; inset:0 }` resolves
+   * against once _onContent makes body the containing block. Not <html> — a chapter's
+   * body margin (this book's stylesheet sets `body { margin-top: 1em }`) collapses out
+   * to the root, so body sits ~30px below documentElement and is ~30px shorter.
+   * Normalizing against one box and painting into the other slides every highlight down
+   * by most of a line near the chapter top.
+   */
+  _frameRect(contents) {
+    const body = contents.document.body;
+    const r = body.getBoundingClientRect();
+    return {
+      left: r.left + body.clientLeft,
+      top: r.top + body.clientTop,
+      width: body.clientWidth,
+      height: body.clientHeight,
+    };
+  }
+
   /** Live rects for a highlight's cfi, resolved against however this chapter is laid
    * out right now. Not cached — see the file header for why. */
   rectsForCfi(spineIndex, cfi) {
@@ -233,9 +253,9 @@ export class EpubReader {
     }
     if (!range) return [];
 
-    const pageRect = contents.document.documentElement.getBoundingClientRect();
+    const frame = this._frameRect(contents);
     const raw = Array.from(range.getClientRects())
-      .map((r) => rectToPage(r, pageRect))
+      .map((r) => rectToPage(r, frame))
       .filter((r) => r.w > 0.0005 && r.h > 0.0005);
     return mergeLineRects(raw).map((r) => ({
       x: quantize(r.x),

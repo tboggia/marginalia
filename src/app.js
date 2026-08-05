@@ -149,7 +149,13 @@ async function boot() {
     if (!store.user) return showAuth();
     me = {
       id: store.user.id,
-      name: store.user.user_metadata?.name ?? store.user.email?.split('@')[0] ?? 'You',
+      // The who-dialog's saved name wins over the session's, for the same reason the
+      // color below does: without it the dialog appears to work and then reverts to
+      // the email local-part on the next load.
+      name: pref(
+        uidKey + ':name',
+        store.user.user_metadata?.name ?? store.user.email?.split('@')[0] ?? 'You'
+      ),
       // Same key the who-dialog writes (uidKey + ':color'). This used to read
       // 'marginalia:color', which nothing ever wrote — so the picked color
       // silently reverted to amber on every refresh in hosted mode.

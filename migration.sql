@@ -65,6 +65,12 @@ drop policy if exists read_documents on documents;
 create policy read_documents on documents for select
   using (is_member(id) or created_by = auth.uid());
 
+-- Deleting a book is a later feature than this file's first version, and a table with
+-- RLS on and no DELETE policy does not error — the delete simply matches zero rows and
+-- returns success. Without this, the shelf's delete button appears to do nothing.
+drop policy if exists delete_documents on documents;
+create policy delete_documents on documents for delete using (is_member(id));
+
 -- -------------------------------------------------------------- storage RLS
 -- The original upload policy checked `owner = auth.uid()`, but `owner` is populated
 -- server-side *after* the WITH CHECK runs, so it compared against NULL and rejected
@@ -75,6 +81,20 @@ create policy upload_books on storage.objects for insert
   with check (
     bucket_id = 'books'
     and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+-- The other half of delete. deleteDocument in supabase-adapter.js removes the storage
+-- object *before* the documents row, so this checks membership by joining back to
+-- documents the same way read_books does — the path-prefix check upload_books uses
+-- would only let the uploader delete, not the second reader.
+drop policy if exists delete_books on storage.objects;
+create policy delete_books on storage.objects for delete
+  using (
+    bucket_id = 'books'
+    and exists (
+      select 1 from documents d
+      where d.storage_path = storage.objects.name and is_member(d.id)
+    )
   );
 
 commit;

@@ -186,8 +186,14 @@ export class SupabaseStore {
     const { error: storageErr } = await this.sb.storage.from('books').remove([doc.storage_path]);
     if (storageErr) throw storageErr;
 
-    const { error } = await this.sb.from('documents').delete().eq('id', docId);
+    // `.select()` so the delete reports what it actually removed. RLS does not error on
+    // a forbidden delete — it filters the row out and returns success — so without this
+    // a missing `delete_documents` policy looks exactly like a working delete until the
+    // shelf re-renders with the book still on it.
+    const { data: gone, error } = await this.sb
+      .from('documents').delete().eq('id', docId).select('id');
     if (error) throw error;
+    if (!gone?.length) throw new Error('That book didn’t delete — the database refused it.');
   }
 
   async getInviteCode(docId) {
