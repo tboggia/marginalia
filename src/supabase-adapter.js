@@ -158,10 +158,13 @@ export class SupabaseStore {
   }
 
   async listDocuments() {
-    const { data } = await this.sb
+    const { data, error } = await this.sb
       .from('documents')
       .select('id,title,author,cover,format,created_at')
       .order('created_at', { ascending: false });
+    // A schema drift here (a column the deployed database never got) comes back as a
+    // 400 and an empty shelf, which reads exactly like "you have no books yet".
+    if (error) throw error;
     return (data ?? []).map((d) => ({
       id: d.id, title: d.title, author: d.author ?? null, cover: d.cover ?? null,
       format: d.format, createdAt: Date.parse(d.created_at),

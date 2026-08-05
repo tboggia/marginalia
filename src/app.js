@@ -322,7 +322,13 @@ function bookCard(d, onOpen, onDelete) {
 }
 
 async function renderShelf() {
-  const docs = await store.listDocuments();
+  let docs;
+  try {
+    docs = await store.listDocuments();
+  } catch (e) {
+    toast(`Couldn’t load your books: ${e.message}`);
+    return;
+  }
   const el = $('#recent');
   el.innerHTML = '';
   // Drives the whole start screen's layout: shelf-first, or drop-zone-first when
@@ -565,6 +571,8 @@ async function openDoc(id, doc = {}) {
   $('#byline').hidden = !author;
   $('#start').hidden = true;
   $('#t-home').disabled = false;
+  // Gates the reading controls (tools, zoom) in CSS: they mean nothing over a shelf.
+  app.dataset.open = 'true';
   app.dataset.format = reader.kind;
   // Ink has no coherent anchor on reflowable text — see README "known gaps". Disabled
   // rather than hidden: a missing Draw button reads as a bug, a greyed one with this
@@ -582,6 +590,8 @@ async function openDoc(id, doc = {}) {
   if (!source) {
     hideLoading();
     toast('That book is no longer on this device.');
+    delete app.dataset.open;
+    delete app.dataset.format;
     $('#start').hidden = false;
     return;
   }
@@ -670,6 +680,7 @@ function closeDoc() {
   $('#note-count').textContent = '';
   $('#notes').innerHTML = '';
   delete app.dataset.format;
+  delete app.dataset.open;
   $('#start').hidden = false;
   renderShelf();
 }
@@ -832,10 +843,14 @@ function bindTools() {
 
   document.addEventListener('keydown', (e) => {
     if (e.target.matches('input, textarea')) return;
-    if (e.key === 'v') setTool('select');
-    // No ink on reflowable text — see README "known gaps" — so these are PDF-only.
-    if (e.key === 'd' && reader?.kind !== 'epub') setTool('ink');
-    if (e.key === 'e' && reader?.kind !== 'epub') setTool('erase');
+    // The tool keys match buttons that aren't on screen without a book open, so
+    // they stay off too — a shortcut for an invisible control is a trap.
+    if (reader) {
+      if (e.key === 'v') setTool('select');
+      // No ink on reflowable text — see README "known gaps" — so these are PDF-only.
+      if (e.key === 'd' && reader.kind !== 'epub') setTool('ink');
+      if (e.key === 'e' && reader.kind !== 'epub') setTool('erase');
+    }
     if (e.key === 'Escape') closePopover();
     if ((e.metaKey || e.ctrlKey) && e.key === '=') { e.preventDefault(); zoomBy(0.2); }
     if ((e.metaKey || e.ctrlKey) && e.key === '-') { e.preventDefault(); zoomBy(-0.2); }

@@ -151,6 +151,13 @@
 
   #zoom { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 4ch; text-align: center; }
 
+  /* The exception to the rule above: hidden beats disabled when there is no book at
+     all. Greying out Draw says "not for this book"; over the shelf there is no book
+     for it to be about, so the tools and zoom leave with it (see openDoc/closeDoc). */
+  #app:not([data-open]) :is(#sep-tools, #t-select, #t-ink, #t-erase, #zoom-out, #zoom-in, #zoom) {
+    display: none;
+  }
+
   /* Which #t-panel glyph shows tracks whether the margin is open — the arrow icon
      signals "clicking tucks the panel away". */
   #t-panel .ico-close { display: none; }
@@ -459,7 +466,15 @@
   }
   .dlg textarea { min-height: 92px; line-height: 1.5; }
   .dlg-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
-  .btn { height: 30px; padding: 0 13px; border-radius: 6px; font-size: 12px; background: var(--panel); }
+  /* Centred by flex, not by the UA: #pick-big flips display to inline-flex for
+     the empty state, which drops a button's built-in text centring and leaves
+     the label sitting on the top edge. Owning it here keeps every .btn alike. */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 30px; padding: 0 13px; border-radius: 6px;
+    font-size: 12px; line-height: 1; white-space: nowrap;
+    background: var(--panel);
+  }
   .btn:hover { background: var(--rule); }
   .btn.primary { background: var(--text); color: var(--ink); font-weight: 600; }
   .btn.primary:hover { background: #fff; }
@@ -676,7 +691,7 @@
       <div id="title"></div>
       <div id="byline" hidden></div>
     </div>
-    <div class="sep"></div>
+    <div class="sep" id="sep-tools"></div>
 
     <button class="tool" id="t-select" aria-pressed="true" title="Select text to highlight">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l7 16 2-7 7-2z"/></svg>Select
