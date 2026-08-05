@@ -1318,6 +1318,15 @@ function openWhoDialog() {
 }
 
 function bindWhoDialog() {
+  /* Implicit submission in a dialog form takes the *first* submit button, which
+     here is Cancel — so Enter in the name field would discard the edit. Route it
+     to Save instead: after typing a name, Enter means "yes, that one". */
+  $('#who-name').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    $('#who-dlg').querySelector('button[value="save"]').click();
+  });
+
   $('#who-dlg').addEventListener('close', async (e) => {
     const dlg = $('#who-dlg');
     if (dlg.returnValue !== 'save') return;
