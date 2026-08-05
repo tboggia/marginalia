@@ -35,22 +35,30 @@ export function shouldDraw(event, inkMode) {
 }
 
 /**
- * Attach ink capture to one page's canvas.
+ * Attach ink capture to one page.
+ *
+ * Input is bound to `host` (the .page element) rather than to the canvas, because the
+ * canvas is `pointer-events: none` — on top of the text layer, it would otherwise eat
+ * the drag that starts a text selection. The host is the common ancestor of all four
+ * layers, so every pointerdown reaches it by bubbling whichever layer was hit, and the
+ * two elements share a box, so the coordinate math is unchanged.
  *
  * `getState()` returns {inkMode, color, docId, userId} fresh on every event, so the
  * toolbar can change under a page without re-binding listeners.
  */
-export function attachInk(canvas, pageNumber, getState, onCommit) {
+export function attachInk(host, canvas, pageNumber, getState, onCommit) {
   let active = null;
 
-  canvas.addEventListener('pointerdown', (e) => {
+  host.addEventListener('pointerdown', (e) => {
     const state = getState();
     if (!shouldDraw(e, state.inkMode)) return;
     // The barrel button turns the pen into an eraser on hardware that reports it.
     if (e.button === 5 || e.buttons === 32) return;
 
+    // Also what stops a pen stroke from doubling as a text selection: a pen draws in
+    // select mode, so the browser would otherwise treat the drag as a selection too.
     e.preventDefault();
-    canvas.setPointerCapture(e.pointerId);
+    host.setPointerCapture(e.pointerId);
     const rect = canvas.getBoundingClientRect();
     const pt = toPage(e.clientX, e.clientY, rect);
     active = {
@@ -60,10 +68,10 @@ export function attachInk(canvas, pageNumber, getState, onCommit) {
     };
     // Only steal touch-action while a stroke is actually in flight. Leaving it off
     // permanently kills scrolling on the page underneath.
-    canvas.style.touchAction = 'none';
+    host.style.touchAction = 'none';
   });
 
-  canvas.addEventListener('pointermove', (e) => {
+  host.addEventListener('pointermove', (e) => {
     if (!active || e.pointerId !== active.pointerId) return;
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();
@@ -81,7 +89,7 @@ export function attachInk(canvas, pageNumber, getState, onCommit) {
 
   const finish = (e) => {
     if (!active || e.pointerId !== active.pointerId) return;
-    canvas.style.touchAction = '';
+    host.style.touchAction = '';
     const points = simplify(active.points).map(([x, y, p]) => [
       quantize(x),
       quantize(y),
@@ -95,9 +103,9 @@ export function attachInk(canvas, pageNumber, getState, onCommit) {
     else redraw(canvas, canvas._strokes ?? []);
   };
 
-  canvas.addEventListener('pointerup', finish);
-  canvas.addEventListener('pointercancel', finish);
-  canvas.addEventListener('pointerleave', finish);
+  host.addEventListener('pointerup', finish);
+  host.addEventListener('pointercancel', finish);
+  host.addEventListener('pointerleave', finish);
 }
 
 function drawLive(canvas, active) {

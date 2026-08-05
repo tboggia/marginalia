@@ -15,29 +15,60 @@
      thing on screen. Amber and cyan as the two default reader colors
      is a deliberate pick: yellow-vs-blue is the one axis that stays
      distinguishable under every common form of color blindness.
+
+     Every value below is contrast-checked, and that's a rule, not a
+     one-off pass — see README "Accessibility" before changing one.
+     The ratio in each comment is against the darkest surface the token
+     is allowed to sit on. Text tokens clear 4.5:1 on all three
+     surfaces; --edge is the border color for anything interactive and
+     clears the 3:1 that non-text UI needs; --rule stays below that on
+     purpose because it only ever draws decorative hairlines that carry
+     no information a border is the sole signal of.
      --------------------------------------------------------------- */
   :root {
     --ink:        #0E1116;
     --panel:      #161B22;
     --raised:     #1D242D;
-    --rule:       #262E39;
-    --text:       #DCE3EB;
-    --muted:      #7C8794;
-    --faint:      #4B5563;
+    --raised-2:   #252E39;   /* hover on --raised */
+    --rule:       #2C3542;   /* decorative hairlines only */
+    --edge:       #6B7480;   /* interactive borders — 3.3:1 on --raised */
+    --text:       #DCE3EB;   /* 12.1:1 on --raised */
+    --muted:      #A3ADBA;   /*  6.9:1 on --raised */
+    --faint:      #8A94A3;   /*  5.1:1 on --raised — meta text, still readable */
 
+    /* Reader colors do double duty: UI text/fills on a dark surface, and
+       highlight tints multiplied over white paper. Each clears 4.5:1 as
+       text on --raised, and each is dark enough that --ink reads on top
+       of it when it's a filled marker (7:1 or better). */
     --c-amber:   #E9A13B;
     --c-cyan:    #3FBFC9;
-    --c-magenta: #D95B9A;
-    --c-violet:  #8A7BE0;
+    --c-magenta: #E87CB0;
+    --c-violet:  #9E90EA;
     --c-lime:    #7FBF3F;
-    --c-coral:   #E4663F;
+    --c-coral:   #EE7F5C;
 
     --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
-    --spine-w: 60px;
+    --spine-w: 84px;
+    /* How far the other reader's marker sits from the rail. It's a token because the
+       lane line, the dot, and the narrow-screen override all have to agree on it. */
+    --them-lane: 26px;
     --panel-w: 320px;
     --top-h: 52px;
+  }
+
+  /* Windows high-contrast mode and "increase contrast" on macOS/iOS. The palette
+     above is tuned for a dark room; this is for people who have told the OS that
+     tuning isn't enough. */
+  @media (prefers-contrast: more) {
+    :root {
+      --text: #FFFFFF;
+      --muted: #D6DEE7;
+      --faint: #C0CAD5;
+      --rule: #55606E;
+      --edge: #97A2AF;
+    }
   }
 
   * { box-sizing: border-box; }
@@ -53,14 +84,26 @@
   }
 
   button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
-  :focus-visible { outline: 2px solid var(--c-cyan); outline-offset: 2px; border-radius: 3px; }
+  /* One focus style for the whole app, and it is never removed. 2px of cyan on the
+     darkest surface is 8.5:1; the dark outer ring keeps it visible when the focused
+     thing is itself a bright fill (a swatch, a spine pill, a book cover). */
+  :focus-visible {
+    outline: 2px solid var(--c-cyan);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px var(--ink);
+    border-radius: 3px;
+  }
+  /* Anything that scrolls must be reachable and describable by keyboard alone. */
+  #scroller:focus-visible { outline-offset: -3px; }
 
   /* ---------------------------------------------------------------- shell */
   #app {
     display: grid;
     grid-template-columns: var(--spine-w) 1fr var(--panel-w);
-    grid-template-rows: var(--top-h) 1fr;
-    grid-template-areas: "top top top" "spine scroller panel";
+    /* The notice row is `auto`, so it takes no space at all while #notice is
+       hidden — nothing shifts on books that have a text layer. */
+    grid-template-rows: var(--top-h) auto 1fr;
+    grid-template-areas: "top top top" "notice notice notice" "spine scroller panel";
     height: 100%;
   }
   #app[data-panel="closed"] { grid-template-columns: var(--spine-w) 1fr 0; }
@@ -79,6 +122,13 @@
     max-width: 30ch;
   }
   #title:empty::before { content: "No book open"; color: var(--faint); font-weight: 400; }
+  /* The author sits under the title rather than glued to it with an em dash, so a
+     long title truncates without taking the author with it. */
+  #titlebox { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 1px; }
+  #byline {
+    font-size: 10.5px; color: var(--faint);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30ch;
+  }
 
   .sep { width: 1px; height: 22px; background: var(--rule); flex: none; }
   .spacer { flex: 1; }
@@ -94,8 +144,10 @@
   .tool svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
   /* Disabled beats hidden: a vanished Draw button reads as a bug, a greyed one with a
-     tooltip reads as a rule. Used for ink on EPUB and zoom at its limits. */
-  .tool:disabled { opacity: .35; pointer-events: none; }
+     tooltip reads as a rule. Used for ink on EPUB and zoom at its limits.
+     `.55`, not `.35`: WCAG exempts disabled controls from contrast, but "exempt" and
+     "readable" aren't the same thing, and this one carries a rule you need to read. */
+  .tool:disabled { opacity: .55; pointer-events: none; }
 
   #zoom { font-family: var(--mono); font-size: 11px; color: var(--muted); min-width: 4ch; text-align: center; }
 
@@ -114,11 +166,43 @@
   .swatch:hover { transform: scale(1.15); }
   .swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px currentColor; }
 
+  /* --------------------------------------------------------------- notice
+     Said once, at the door, for the whole book: this is a scan, so there is
+     nothing to select. Not a toast — a toast is for things that just happened
+     and stop being true; this is a standing property of the file you opened,
+     and it should survive as long as you haven't acknowledged it.            */
+  #notice {
+    grid-area: notice;
+    display: flex; align-items: center; gap: 12px;
+    padding: 9px 16px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--raised);
+    font-size: 12px; color: var(--text);
+  }
+  #notice[hidden] { display: none; }
+  #notice svg {
+    width: 17px; height: 17px; flex: none;
+    fill: none; stroke: var(--c-amber); stroke-width: 1.6;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  #notice .sub { color: var(--muted); }
+  #notice .btn { height: 26px; padding: 0 10px; font-size: 11.5px; }
+
   /* ---------------------------------------------------------------- spine
      The signature element. The whole book as one vertical track, with a
      marker for each reader and a tick for every annotation. It's the only
      place in the interface where "we are reading this apart" is a visible,
-     measurable thing rather than an idea.                                  */
+     measurable thing rather than an idea.
+
+     Your own position is a *pill*, not a dot with text crammed inside it.
+     A 22px circle can hold "p.5" and nothing else — "p.147" or "100%"
+     overflowed it and got clipped by the rail. The pill sizes to its
+     label instead, so the number is the thing that decides the geometry
+     rather than the other way round.
+
+     Their marker rides in its own lane to the right of the rail. Two
+     markers on one lane collide the moment you're reading the same page,
+     which is exactly the moment the rail is most worth looking at.       */
   #spine {
     grid-area: spine;
     position: relative;
@@ -126,32 +210,63 @@
     background: var(--panel);
   }
   #track {
-    position: absolute; left: 50%; top: 40px; bottom: 40px;
-    width: 2px; margin-left: -1px;
-    background: var(--rule); border-radius: 1px;
+    position: absolute; left: 50%; top: 44px; bottom: 44px;
+    width: 3px; margin-left: -1.5px;
+    background: var(--rule); border-radius: 2px;
+  }
+  /* The span of rail between the two of you, painted in. The gap is the point of
+     the rail, and a number alone ("41p") makes you do the arithmetic of where that
+     distance actually sits in the book. */
+  #between {
+    position: absolute; left: 50%; width: 3px; margin-left: -1.5px;
+    border-radius: 2px; opacity: .55;
+    transition: top .5s cubic-bezier(.22,1,.36,1), height .5s cubic-bezier(.22,1,.36,1);
   }
   .tick {
-    position: absolute; left: 50%; width: 9px; height: 2px;
-    margin-left: -4.5px; border-radius: 1px; opacity: .5;
+    position: absolute; left: 50%; width: 11px; height: 2px;
+    margin-left: -5.5px; border-radius: 1px; opacity: .75;
   }
+  /* You: a pill on the rail, as wide as the label needs. */
   .marker {
-    position: absolute; left: 50%; width: 22px; height: 22px; margin-left: -11px;
-    border-radius: 50%; transform: translateY(-50%);
+    position: absolute; left: 50%;
+    height: 20px; min-width: 20px; padding: 0 7px;
+    border-radius: 10px;
+    transform: translate(-50%, -50%);
     display: grid; place-items: center;
-    font: 600 9px/1 var(--mono);
+    font: 600 10px/1 var(--mono);
     color: var(--ink);
+    /* The ring is what keeps the pill legible when it lands on a cluster of
+       ticks — without it the pill's edge dissolves into them. */
+    box-shadow: 0 0 0 2px var(--panel);
     transition: top .5s cubic-bezier(.22,1,.36,1);
     cursor: pointer;
+    z-index: 2;
   }
-  .marker.them { width: 16px; height: 16px; margin-left: -8px; font-size: 0; }
+  /* Them: a dot in the right-hand lane, never under your pill. */
+  .marker.them {
+    left: calc(50% + var(--them-lane));
+    width: 14px; height: 14px; min-width: 0; padding: 0;
+    border-radius: 50%; font-size: 0;
+    z-index: 3;
+  }
   .marker.them::after {
-    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    content: ""; width: 5px; height: 5px; border-radius: 50%;
     background: var(--ink);
   }
+  /* Their lane needs a hairline of its own, or the dot floats in space with
+     nothing to read it against. */
+  #spine::after {
+    content: ""; position: absolute;
+    left: calc(50% + var(--them-lane)); top: 44px; bottom: 44px;
+    width: 1px; margin-left: -.5px;
+    background: var(--rule); opacity: .5;
+  }
+  /* The distance, parked in the left lane at the midpoint between you. app.js
+     hides it when you're close enough that it would sit on top of the pill. */
   #gap {
-    position: absolute; left: 0; right: 0;
+    position: absolute; left: 4px; width: calc(50% - 14px);
     font: 500 9px/1.3 var(--mono);
-    color: var(--faint); text-align: center;
+    color: var(--faint); text-align: right;
     pointer-events: none;
     transition: top .5s cubic-bezier(.22,1,.36,1);
   }
@@ -159,8 +274,8 @@
     position: absolute; left: 0; right: 0; text-align: center;
     font: 500 9px var(--mono); color: var(--faint);
   }
-  #spine-top { top: 18px; }
-  #spine-bot { bottom: 18px; }
+  #spine-top { top: 20px; }
+  #spine-bot { bottom: 20px; }
 
   /* ---------------------------------------------------------------- pages */
   #scroller {
@@ -179,11 +294,33 @@
   .page > canvas, .page > div { position: absolute; inset: 0; }
   canvas.pdf { z-index: 1; }
   .text-layer{ z-index: 3; overflow: hidden; line-height: 1; text-size-adjust: none; }
-  canvas.ink { z-index: 4; touch-action: pan-y; }
-  .page-num {
+  /* Painting surface only. It sits above the text layer, so if it hit-tested it
+     would eat the drag that starts a text selection. Ink input is bound to .page
+     instead (see ink.js), which is under everything and gets it by bubbling. */
+  canvas.ink { z-index: 4; pointer-events: none; }
+  /* `.page > .page-num`, not `.page-num`: `.page > div` above is more specific, so a
+     bare class selector loses its `inset` to that rule's `inset: 0` and the label
+     lands in the page's top-left corner — behind canvas.pdf, which has a z-index,
+     so it disappears entirely. Same reason for `.page > .no-text` below. */
+  .page > .page-num {
     position: absolute; inset: auto auto -18px 0; height: 14px;
     font: 500 9px var(--mono); color: var(--faint);
     pointer-events: none;
+  }
+
+  /* Rides in the gutter beside the page number, because that's where facts about
+     the page (rather than about your reading) already live. Faint enough to
+     ignore while you read, legible the moment you wonder why a drag did nothing. */
+  .page > .no-text {
+    position: absolute; inset: auto auto -19px 34px; height: 14px;
+    display: flex; align-items: center; gap: 4px;
+    font: 500 9px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase;
+    color: var(--faint); cursor: help;
+  }
+  .no-text svg {
+    width: 11px; height: 11px; flex: none;
+    fill: none; stroke: currentColor; stroke-width: 1.7;
+    stroke-linecap: round; stroke-linejoin: round;
   }
 
   .text-layer span {
@@ -192,7 +329,21 @@
   }
   .text-layer ::selection { background: rgba(63,191,201,.35); }
   #app[data-ink="on"] .text-layer { pointer-events: none; }
-  #app[data-ink="on"] canvas.ink { touch-action: pan-y; cursor: crosshair; }
+
+  /* The two ink cursors are the toolbar's own pencil and eraser glyphs, so the pointer
+     says the same thing the pressed button does. Each is drawn twice — a fat white
+     stroke under a dark one — because a bare 1.6px outline vanishes against a page that
+     is mostly white with black text. The two numbers after the url() are the hotspot:
+     the pencil's tip and the eraser's leading corner, not the glyph's top-left. */
+  #app[data-tool="ink"] .page {
+    cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M17 3l4 4L8 20l-5 1 1-5z' stroke='%23fff' stroke-width='3.6'/%3E%3Cpath d='M17 3l4 4L8 20l-5 1 1-5z' stroke='%23111' stroke-width='1.6'/%3E%3C/svg%3E") 3 21, crosshair;
+  }
+  /* Erase leaves the text layer live (it hit-tests on a bubbled pointerdown), so the
+     spans' `cursor: text` has to be overridden here too or it wins over .page. */
+  #app[data-tool="erase"] .page,
+  #app[data-tool="erase"] .text-layer span {
+    cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 16l6-6 8 8-3 3H7zM10 10l5-5 8 8-5 5' stroke='%23fff' stroke-width='3.6'/%3E%3Cpath d='M4 16l6-6 8 8-3 3H7zM10 10l5-5 8 8-5 5' stroke='%23111' stroke-width='1.6'/%3E%3C/svg%3E") 6 20, cell;
+  }
 
   /* ---------------------------------------------------------------- popover */
   #pop {
@@ -213,6 +364,25 @@
   /* Your color, shown not chosen — the swatch in the toolbar is where it's set. */
   #pop .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 
+  /* The refusal: same chrome as the highlight popover, and in the same place, because
+     it's the answer to the gesture that would have opened that one. */
+  #pop[data-kind="no-text"] {
+    flex-direction: column; align-items: stretch; gap: 0;
+    width: 244px; padding: 10px 12px 6px;
+  }
+  #pop .why { display: flex; gap: 8px; align-items: flex-start; }
+  #pop .why svg {
+    width: 15px; height: 15px; flex: none; margin-top: 1px;
+    fill: none; stroke: var(--c-amber); stroke-width: 1.6;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  #pop .why b { display: block; font-size: 12px; font-weight: 600; color: var(--text); }
+  #pop .why span { font-size: 11.5px; line-height: 1.5; color: var(--muted); }
+  #pop hr { height: 1px; margin: 9px -12px 3px; border: 0; background: var(--rule); }
+  #pop .key {
+    margin-left: auto; font: 500 9px var(--mono); color: var(--faint);
+  }
+
   /* ---------------------------------------------------------------- panel */
   #panel {
     grid-area: panel;
@@ -231,12 +401,13 @@
   }
   #notes { flex: 1; overflow-y: auto; padding: 8px; }
   .note {
+    position: relative;
     padding: 10px; border-radius: 7px; margin-bottom: 6px;
     background: var(--raised);
     border-left: 2px solid currentColor;
     cursor: pointer;
   }
-  .note:hover { background: #232B35; }
+  .note:hover { background: var(--raised-2); }
   .note-meta {
     display: flex; justify-content: space-between; align-items: baseline;
     font: 500 9px var(--mono); color: var(--faint); margin-bottom: 5px;
@@ -248,6 +419,17 @@
     display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
   }
   .note-body { font-size: 12.5px; line-height: 1.5; color: var(--text); white-space: pre-wrap; }
+  /* Hover-revealed, like .recent-delete — a removal that's one click away shouldn't
+     also be the most visible thing in the margin. It sits over .note-meta's right
+     edge, which only ever holds a short position label. */
+  .note-del {
+    position: absolute; top: 6px; right: 6px;
+    padding: 3px 6px; border-radius: 5px;
+    font-size: 12px; line-height: 1; color: var(--faint); opacity: 0;
+    transition: opacity .1s, color .1s, background .1s;
+  }
+  .note:hover .note-del, .note-del:focus-visible { opacity: 1; }
+  .note-del:hover { color: var(--c-coral); background: var(--ink); }
   .empty {
     padding: 28px 16px; text-align: center;
     font-size: 12px; line-height: 1.6; color: var(--faint);
@@ -264,11 +446,16 @@
   .dlg { padding: 18px; }
   .dlg h2 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
   .dlg p { margin: 0 0 14px; font-size: 12px; line-height: 1.55; color: var(--muted); }
+  /* --edge, not --rule: a field's border is the only thing saying "you can type
+     here", so it's a UI component under 1.4.11 and owes 3:1, not a hairline. */
   .dlg textarea, .dlg input[type="text"] {
     width: 100%; padding: 9px 10px; border-radius: 6px;
     background: var(--ink); color: var(--text);
-    border: 1px solid var(--rule); font: inherit; font-size: 12.5px;
+    border: 1px solid var(--edge); font: inherit; font-size: 12.5px;
     resize: vertical;
+  }
+  .dlg textarea::placeholder, .dlg input::placeholder, #auth input::placeholder {
+    color: var(--faint); opacity: 1; /* Firefox dims placeholders by default */
   }
   .dlg textarea { min-height: 92px; line-height: 1.5; }
   .dlg-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
@@ -279,38 +466,130 @@
   .btn.danger:hover { background: #4A1F1F; color: #F0A0A0; }
 
   /* ---------------------------------------------------------------- start
-     Two distinct journeys, two distinct cards: #drop (dashed = a place to put
-     something new) and #shelf (solid = things you already have). #start stays
-     hidden until boot() knows whether an auth screen is coming, so the drop
-     zone doesn't flash before the sign-in gate covers it.                   */
-  #start { position: absolute; inset: var(--top-h) 0 0 var(--spine-w); display: grid; place-items: center; background: var(--ink); z-index: 20; }
+     The library, not the loading dock. Adding a book happens a handful of
+     times; opening one you already have happens every session — so the
+     shelf gets the covers, the space, and the top of the screen, and the
+     drop zone shrinks to a strip underneath it. On a first run there's no
+     shelf to show, so `data-empty` flips them back and the drop zone
+     becomes the whole screen again.
+
+     #start stays hidden until boot() knows whether an auth screen is
+     coming, so none of this flashes before the sign-in gate covers it.   */
+  #start {
+    position: absolute; inset: var(--top-h) 0 0 var(--spine-w);
+    overflow-y: auto; background: var(--ink); z-index: 20;
+    display: grid; place-items: start center;
+  }
   #start[hidden] { display: none; }
-  #start-inner { width: min(440px, calc(100% - 48px)); display: flex; flex-direction: column; gap: 16px; }
+  #start[data-empty="true"] { place-items: center; }
+  #start-inner {
+    width: min(860px, calc(100% - 48px));
+    padding: 40px 0 56px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  #start[data-empty="true"] #start-inner { width: min(440px, calc(100% - 48px)); padding: 0; }
+
+  #start-head { display: flex; align-items: center; gap: 12px; }
+  #start-head h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  #start[data-empty="true"] #start-head { display: none; }
+
+  /* ------------------------------------------------------------- the shelf */
+  #shelf[hidden], #start[data-empty="true"] #shelf { display: none; }
+  #recent {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(138px, 1fr));
+    gap: 22px 20px;
+  }
+  .book { position: relative; min-width: 0; }
+  .book-open {
+    display: block; width: 100%; text-align: left;
+    border-radius: 10px; padding: 0;
+  }
+  /* 2:3 is the proportion of a mass-market paperback, and the reason a cover-less
+     card still reads as a book rather than a tile. */
+  .cover {
+    position: relative; aspect-ratio: 2 / 3; width: 100%;
+    border-radius: 3px 8px 8px 3px; overflow: hidden;
+    background: var(--raised);
+    box-shadow: 0 1px 2px rgba(0,0,0,.6), 0 12px 26px rgba(0,0,0,.45);
+    transition: transform .16s cubic-bezier(.22,1,.36,1), box-shadow .16s;
+  }
+  .book-open:hover .cover { transform: translateY(-3px); box-shadow: 0 2px 4px rgba(0,0,0,.6), 0 18px 34px rgba(0,0,0,.55); }
+  .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* The fallback jacket: the book's own words, set like a title page. Not a
+     placeholder icon — the title is the most useful thing we have, so it should
+     be the thing that fills the cover. */
+  .cover .jacket {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; justify-content: center; gap: 8px;
+    padding: 18px 14px; text-align: center;
+    background: linear-gradient(160deg, var(--jacket-a) 0%, var(--jacket-b) 100%);
+  }
+  .cover .jacket .jt {
+    font: 600 13px/1.35 Georgia, "Iowan Old Style", "Times New Roman", serif;
+    color: #F4F1EA;
+    display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .cover .jacket .ja {
+    font: 400 10.5px/1.4 Georgia, "Iowan Old Style", "Times New Roman", serif;
+    color: rgba(244,241,234,.86);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  /* The stitched edge. Cheap, and it's what sells "book" over "thumbnail". */
+  .cover::after {
+    content: ""; position: absolute; inset: 0 auto 0 0; width: 6px;
+    background: linear-gradient(90deg, rgba(0,0,0,.42), rgba(0,0,0,0));
+    pointer-events: none;
+  }
+  .fmt {
+    position: absolute; right: 6px; bottom: 6px;
+    padding: 2px 5px; border-radius: 4px;
+    font: 600 9px/1 var(--mono); letter-spacing: .06em;
+    color: #F4F1EA; background: rgba(9,12,16,.78);
+  }
+  .book-title {
+    margin-top: 9px; font-size: 12.5px; line-height: 1.35; color: var(--text);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .book-author {
+    margin-top: 2px; font-size: 11.5px; line-height: 1.35; color: var(--faint);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* Hover-and-focus revealed, like .note-del. Deleting a book is unrecoverable, so
+     it shouldn't be the second-most prominent thing on a shelf you use to open them.
+     `:focus-within` keeps it reachable for anyone driving this from the keyboard. */
+  .book-del {
+    position: absolute; top: 6px; right: 6px;
+    width: 24px; height: 24px; border-radius: 6px;
+    display: grid; place-items: center;
+    font-size: 13px; line-height: 1;
+    color: #F4F1EA; background: rgba(9,12,16,.7);
+    opacity: 0; transition: opacity .12s, color .12s, background .12s;
+  }
+  .book:hover .book-del, .book:focus-within .book-del { opacity: 1; }
+  .book-del:hover { color: #FFD9CC; background: #7A2A18; }
+
+  /* --------------------------------------------------------- the drop strip */
   #drop {
-    padding: 40px 28px;
-    border: 1px dashed var(--rule); border-radius: 12px; text-align: center;
+    padding: 14px 18px;
+    border: 1px dashed var(--edge); border-radius: 12px;
+    text-align: center; color: var(--muted);
     transition: border-color .15s, background .15s;
   }
-  #drop.over { border-color: var(--c-amber); background: rgba(233,161,59,.05); }
-  #drop h1 { margin: 0 0 8px; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
-  #drop p { margin: 0 0 18px; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
-  #shelf {
-    padding: 14px 16px 10px;
-    border: 1px solid var(--rule); border-radius: 12px;
-    background: var(--panel); text-align: left;
+  #drop.over { border-color: var(--c-amber); background: rgba(233,161,59,.08); }
+  #drop h1, #drop .lede, #drop #pick-big { display: none; }
+  #drop p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+  /* Empty state: the strip becomes the card the first run needs. */
+  #start[data-empty="true"] #drop { padding: 40px 28px; }
+  #start[data-empty="true"] #drop h1 { display: block; margin: 0 0 8px; font-size: 17px; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
+  #start[data-empty="true"] #drop .lede { display: block; }
+  #start[data-empty="true"] #drop .hint { display: none; }
+  #start[data-empty="true"] #drop #pick-big { display: inline-flex; margin-top: 18px; }
+  .linky {
+    padding: 0; font: inherit; color: var(--text);
+    text-decoration: underline; text-underline-offset: 2px;
   }
-  #shelf[hidden] { display: none; }
-  #shelf-head {
-    font-size: 11px; color: var(--muted);
-    letter-spacing: .04em; text-transform: uppercase;
-    margin-bottom: 8px;
-  }
-  .recent-item {
-    display: flex; justify-content: space-between; width: 100%;
-    padding: 7px 8px; border-radius: 5px; font-size: 12px; color: var(--muted);
-  }
-  .recent-item:hover { background: var(--raised); color: var(--text); }
-  .recent-item span { font: 500 10px var(--mono); color: var(--faint); }
+  .linky:hover { color: var(--c-cyan); }
 
   /* --------------------------------------------------------------- loading
      Covers the reading area from the moment a file is picked until the book
@@ -350,12 +629,16 @@
   #auth p { margin: 0 0 16px; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
   #auth input {
     width: 100%; height: 34px; padding: 0 10px; border-radius: 6px;
-    background: var(--ink); color: var(--text); border: 1px solid var(--rule);
+    background: var(--ink); color: var(--text); border: 1px solid var(--edge);
     font: inherit; font-size: 13px;
   }
   #auth-msg { margin: 12px 0 0; font-size: 11.5px; }
   #auth-msg:empty { display: none; }
-  #auth-msg[data-kind="error"] { color: #E8907A; }
+  /* Never color alone. Both states are the same size in the same place, so the
+     wording has to say which one it is — "That address looks incomplete." reads as
+     a failure without the red, and "Check you@…" reads as a success without the
+     cyan. Color is the second signal here, never the only one. */
+  #auth-msg[data-kind="error"] { color: #F2A08C; }
   #auth-msg[data-kind="sent"] { color: var(--c-cyan); }
 
   #toast {
@@ -372,7 +655,7 @@
     * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   }
   @media (max-width: 900px) {
-    :root { --panel-w: 0px; --spine-w: 44px; }
+    :root { --panel-w: 0px; --spine-w: 64px; --them-lane: 19px; }
     #app { grid-template-columns: var(--spine-w) 1fr 0; }
     #panel { display: none; }
     #zoom, #zoom-out, #zoom-in { display: none; }
@@ -381,55 +664,80 @@
 </head>
 <body>
 
-<div id="app" data-panel="open" data-ink="off">
+<div id="app" data-panel="open" data-ink="off" data-tool="select">
 
   <header id="top">
     <button class="tool" id="t-home" title="Close this book and see your library" disabled>
-      <svg viewBox="0 0 24 24"><path d="M3 5.5C5.6 4.4 8.6 4.4 12 6.3c3.4-1.9 6.4-1.9 9-.8v13.3c-2.6-1.1-5.6-1.1-9 .8-3.4-1.9-6.4-1.9-9-.8z"/><path d="M12 6.3v13.3"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5C5.6 4.4 8.6 4.4 12 6.3c3.4-1.9 6.4-1.9 9-.8v13.3c-2.6-1.1-5.6-1.1-9 .8-3.4-1.9-6.4-1.9-9-.8z"/><path d="M12 6.3v13.3"/></svg>
       Books
     </button>
     <div class="sep"></div>
-    <div id="title"></div>
+    <div id="titlebox">
+      <div id="title"></div>
+      <div id="byline" hidden></div>
+    </div>
     <div class="sep"></div>
 
     <button class="tool" id="t-select" aria-pressed="true" title="Select text to highlight">
-      <svg viewBox="0 0 24 24"><path d="M4 4l7 16 2-7 7-2z"/></svg>Select
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l7 16 2-7 7-2z"/></svg>Select
     </button>
     <button class="tool" id="t-ink" aria-pressed="false" title="Draw with a stylus (a pen always draws)">
-      <svg viewBox="0 0 24 24"><path d="M17 3l4 4L8 20l-5 1 1-5z"/></svg>Draw
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3l4 4L8 20l-5 1 1-5z"/></svg>Draw
     </button>
     <button class="tool" id="t-erase" aria-pressed="false" title="Erase your own ink">
-      <svg viewBox="0 0 24 24"><path d="M4 16l6-6 8 8-3 3H7zM10 10l5-5 8 8-5 5"/></svg>Erase
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16l6-6 8 8-3 3H7zM10 10l5-5 8 8-5 5"/></svg>Erase
     </button>
 
     <div class="spacer"></div>
 
-    <button class="tool" id="zoom-out" title="Zoom out" disabled>−</button>
-    <div id="zoom">—</div>
-    <button class="tool" id="zoom-in" title="Zoom in" disabled>+</button>
+    <button class="tool" id="zoom-out" title="Zoom out" aria-label="Zoom out" disabled>−</button>
+    <!-- The zoom level is the only feedback these two buttons give, and it's not
+         attached to either of them — aria-live is what makes pressing them audible. -->
+    <div id="zoom" aria-live="polite" aria-atomic="true">—</div>
+    <button class="tool" id="zoom-in" title="Zoom in" aria-label="Zoom in" disabled>+</button>
     <div class="sep"></div>
     <button class="tool" id="t-jump" title="Jump to where they are">
-      <svg viewBox="0 0 24 24"><path d="M12 21s7-5.6 7-11a7 7 0 10-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s7-5.6 7-11a7 7 0 10-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>
       <span id="jump-label">Find them</span>
     </button>
     <button class="tool" id="t-invite" title="Copy a link that lets one other person in" hidden>
-      <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7L12 19"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7L12 19"/></svg>
       Invite
     </button>
     <button class="tool" id="t-who" title="Change your name and color">You</button>
-    <button class="tool" id="t-panel" aria-pressed="true" title="Hide the margin">
+    <button class="tool" id="t-panel" aria-pressed="true" aria-controls="panel"
+            title="Hide the margin" aria-label="Hide the margin">
       <!-- Two glyphs, one visible at a time (see #t-panel CSS): the notes icon
-           invites opening; the arrow-into-edge says "this will tuck it away". -->
-      <svg class="ico-open" viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/></svg>
-      <svg class="ico-close" viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M8 12h6"/><path d="M12 9l3 3-3 3"/></svg>
+           invites opening; the arrow-into-edge says "this will tuck it away".
+           aria-hidden on both: the button's label is the accessible name, and an
+           unlabelled <svg> otherwise gets announced as "graphic" beside it. -->
+      <svg class="ico-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/></svg>
+      <svg class="ico-close" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 12h6"/><path d="M12 9l3 3-3 3"/></svg>
     </button>
   </header>
 
+  <!-- Shown by app.js only when a whole PDF comes back with no text layer. role=status
+       rather than alert: it's a standing condition to be aware of, not an emergency,
+       and alert interrupts a screen reader mid-sentence to say so. -->
+  <div id="notice" role="status" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4.5" width="18" height="15" rx="2"/>
+      <circle cx="8.6" cy="9.6" r="1.5"/>
+      <path d="M3.4 16.6l4.6-4.1 3.4 3 3-2.6 6.2 5.1"/>
+    </svg>
+    <div>
+      <span id="notice-msg"></span>
+      <span class="sub" id="notice-sub"></span>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn" id="notice-ok">Got it</button>
+  </div>
+
   <nav id="spine" aria-label="Position in the book">
-    <div id="spine-top">1</div>
-    <div id="track"></div>
-    <div id="spine-bot">—</div>
-    <div id="gap"></div>
+    <div id="spine-top" aria-hidden="true">1</div>
+    <div id="track"><div id="between" hidden></div></div>
+    <div id="spine-bot" aria-hidden="true">—</div>
+    <div id="gap" aria-hidden="true"></div>
   </nav>
 
   <main id="scroller"><div id="pages"></div></main>
@@ -452,18 +760,26 @@
   </div>
 </div>
 
-<div id="start" hidden>
+<div id="start" hidden data-empty="true">
   <div id="start-inner">
+    <div id="start-head">
+      <h1 id="shelf-head">Your books</h1>
+      <div class="spacer"></div>
+      <button class="btn primary" id="pick">Add a book</button>
+    </div>
+
+    <section id="shelf" aria-labelledby="shelf-head" hidden>
+      <div id="recent"></div>
+    </section>
+
     <div id="drop">
       <h1>Open a book</h1>
-      <p>Drop a DRM-free PDF or EPUB here, or choose a file. It stays on this device until you connect a backend.</p>
-      <button class="btn primary" id="pick">Choose a book</button>
-      <input type="file" id="file" accept="application/pdf,application/epub+zip,.pdf,.epub" hidden>
+      <p class="lede">Drop a DRM-free PDF or EPUB here, or choose a file. It stays on this device until you connect a backend.</p>
+      <p class="hint">Drop a PDF or EPUB anywhere here to add it, or <button class="linky" id="pick-alt">choose a file</button>.</p>
+      <button class="btn primary" id="pick-big">Choose a book</button>
     </div>
-    <div id="shelf" hidden>
-      <div id="shelf-head">Your books</div>
-      <div id="recent"></div>
-    </div>
+
+    <input type="file" id="file" accept="application/pdf,application/epub+zip,.pdf,.epub" hidden>
   </div>
 </div>
 
@@ -477,7 +793,7 @@
   <p id="note-quote"></p>
   <textarea id="note-text" placeholder="What did you think?"></textarea>
   <div class="dlg-row">
-    <button class="btn danger" value="delete" id="note-del">Delete</button>
+    <button class="btn danger" value="delete" id="note-delete">Remove highlight</button>
     <div class="spacer"></div>
     <button class="btn" value="cancel">Cancel</button>
     <button class="btn primary" value="save">Save note</button>
@@ -495,7 +811,9 @@
   </div>
 </form></dialog>
 
-<div id="toast"></div>
+<!-- polite, not assertive: toasts here confirm things the user just did.
+     assertive would interrupt a screen reader mid-sentence to say "saved". -->
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script type="module" src="./src/app.js"></script>
 </body>

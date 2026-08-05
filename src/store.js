@@ -7,8 +7,11 @@
  *
  * Store interface:
  *   init()                             -> {docId}
- *   putDocument(file, format, title?)  -> {docId, title, format}
+ *   putDocument(file, format, meta?)   -> {docId, title, author, format}
+ *   listDocuments()                    -> [{id, title, author, cover, format, createdAt}]
  *   getDocumentSource(docId)           -> {data: ArrayBuffer} | {url: string}
+ *   saveDocumentCover(docId, patch)    -> void         (optional; see below)
+ *   deleteDocument(docId)              -> void         (hard: removes the book entirely)
  *   getInviteCode(docId)               -> string | null
  *   listAnnotations(docId)             -> Annotation[]
  *   saveAnnotation(a)                  -> Annotation   (upsert, sets updatedAt)
@@ -118,7 +121,13 @@ export class LocalStore {
     return () => this.listeners.get(docId)?.delete(cb);
   }
 
-  async putDocument(file, format, title) {
+  /**
+   * `meta` is {title, author, cover} — the book's own metadata, read by the caller
+   * before the bytes get here (see app.js readBookMeta). All three are optional and
+   * the filename stays the fallback for the title: a book with no usable dc:title
+   * still has to land on the shelf with something on it.
+   */
+  async putDocument(file, format, meta = {}) {
     const bytes = await file.arrayBuffer();
     const hash = await sha256(bytes);
     const existing = await tx(this.db, ['documents'], 'readonly', (t) =>
@@ -128,7 +137,11 @@ export class LocalStore {
       id: hash,
       // Caller passes the book's own metadata title when it has one; the filename is
       // the fallback, not the source of truth.
-      title: title ?? file.name.replace(/\.(pdf|epub)$/i, ''),
+      title: meta.title ?? file.name.replace(/\.(pdf|epub)$/i, ''),
+      author: meta.author ?? null,
+      // A data: URL, small enough (a ~300px JPEG) to sit in the same record as the
+      // book. Kept out of listDocuments' sort path and nothing else reads it.
+      cover: meta.cover ?? null,
       format,
       bytes,
       createdAt: Date.now(),
@@ -138,7 +151,10 @@ export class LocalStore {
         t.objectStore('documents').put(doc)
       );
     }
-    return { docId: doc.id, title: doc.title, format: doc.format, bytes: doc.bytes };
+    return {
+      docId: doc.id, title: doc.title, author: doc.author ?? null,
+      format: doc.format, bytes: doc.bytes,
+    };
   }
 
   async listDocuments() {
@@ -146,9 +162,58 @@ export class LocalStore {
       wrap(t.objectStore('documents').getAll())
     ).then((docs) =>
       docs
-        .map(({ id, title, format, createdAt }) => ({ id, title, format, createdAt }))
+        .map(({ id, title, author, cover, format, createdAt }) => ({
+          id, title, author: author ?? null, cover: cover ?? null, format, createdAt,
+        }))
         .sort((a, b) => b.createdAt - a.createdAt)
     );
+  }
+
+  /**
+   * Backfill for books that were shelved before covers existed — app.js renders the
+   * fallback jacket, then derives a real cover from the stored bytes and writes it
+   * here so the next open is instant. Local-only on purpose: hosted books get their
+   * cover at upload time, and re-deriving one would mean pulling a 10MB file back
+   * down to make a 30KB thumbnail.
+   */
+  async saveDocumentCover(docId, patch) {
+    const doc = await tx(this.db, ['documents'], 'readonly', (t) =>
+      wrap(t.objectStore('documents').get(docId))
+    );
+    if (!doc) return;
+    await tx(this.db, ['documents'], 'readwrite', (t) =>
+      t.objectStore('documents').put({ ...doc, ...patch })
+    );
+  }
+
+  /**
+   * Hard delete, unlike deleteAnnotation — there's no undo for removing a book, and no
+   * remote copy to reconcile against, so a tombstone would only be dead weight here.
+   * Sweeps every store keyed off this docId, not just `documents`, or annotations and
+   * progress from a deleted book would linger forever with nothing pointing at them.
+   */
+  async deleteDocument(docId) {
+    await tx(this.db, ['documents', 'annotations', 'progress', 'members'], 'readwrite', (t) => {
+      t.objectStore('documents').delete(docId);
+      const annReq = t.objectStore('annotations').index('docId').openCursor(IDBKeyRange.only(docId));
+      annReq.onsuccess = () => {
+        const cursor = annReq.result;
+        if (!cursor) return;
+        cursor.delete();
+        cursor.continue();
+      };
+      // progress and members key on [docId, userId], with no docId-only index, so
+      // sweeping them means walking the whole store and filtering by hand.
+      for (const name of ['progress', 'members']) {
+        const req = t.objectStore(name).openCursor();
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (!cursor) return;
+          if (cursor.value.docId === docId) cursor.delete();
+          cursor.continue();
+        };
+      }
+    });
   }
 
   /** Same shape SupabaseStore returns, so app.js can't tell the two apart. */

@@ -12,6 +12,13 @@ create extension if not exists "pgcrypto";
 create table documents (
   id           uuid primary key default gen_random_uuid(),
   title        text not null,
+  -- Both read out of the file's own metadata at upload time (dc:creator for EPUB,
+  -- the Info dictionary's Author for PDF) and both nullable, because plenty of
+  -- files carry neither. `cover` is a small JPEG data: URL, not a storage object:
+  -- the shelf needs every cover at once, and a bucket object would mean one signed
+  -- URL per book on every render of the library screen.
+  author       text,
+  cover        text,
   storage_path text not null,
   page_count   int  not null default 0,
   format       text not null default 'pdf' check (format in ('pdf', 'epub')),
@@ -136,6 +143,10 @@ $$;
 create policy read_documents on documents for select
   using (is_member(id) or created_by = auth.uid());
 create policy create_documents on documents for insert with check (created_by = auth.uid());
+-- Either reader can delete the shared book, not just whoever uploaded it — same
+-- membership check as read, since there's no separate "owner" concept once a second
+-- reader has joined. Cascades to that document's memberships/progress/annotations.
+create policy delete_documents on documents for delete using (is_member(id));
 
 create policy read_members on memberships for select using (is_member(document_id));
 -- You may only ever write your own membership row. Invites are handled by a separate
@@ -183,6 +194,18 @@ create policy upload_books on storage.objects for insert
   with check (
     bucket_id = 'books'
     and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+-- Deleting a book removes the storage object before the documents row (see
+-- deleteDocument in supabase-adapter.js), so this has to check membership the same
+-- way read_books does rather than the path-prefix check upload_books uses.
+create policy delete_books on storage.objects for delete
+  using (
+    bucket_id = 'books'
+    and exists (
+      select 1 from documents d
+      where d.storage_path = storage.objects.name and is_member(d.id)
+    )
   );
 
 

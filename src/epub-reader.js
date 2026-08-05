@@ -185,6 +185,19 @@ export class EpubReader {
     return { cfi, percent: cfi ? this.percentFor({ cfi }) : 0 };
   }
 
+  /**
+   * Always null, and deliberately: EPUB has no page to be "already on."
+   *
+   * The honest unit here is a spine index, and a chapter is not a page — it can run
+   * for thousands of words. Answering "same chapter" to a caller asking "am I already
+   * looking at this?" would strand you at the top of a chapter with the highlight
+   * still far below, which is worse than a redundant jump. So it declines to answer,
+   * and callers (see app.js's margin panel) jump every time.
+   */
+  currentUnit() {
+    return null;
+  }
+
   /** Where a `{cfi}` (a progress row, an annotation, a position()) sits in the book. */
   percentFor(locator) {
     if (!locator.cfi || !this.book?.locations?.total) return 0;

@@ -7,10 +7,10 @@
  */
 
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs';
-import { Reader } from './reader.js';
+import { Reader, IMAGE_GLYPH } from './reader.js';
 import { EpubReader } from './epub-reader.js';
 import { LocalStore, newId } from './store.js';
-import { config, isHosted } from './config.js';
+import { config, isHosted, describeEnv } from './config.js';
 import { readSelection, hitTest } from './anchors.js';
 import { redraw, distanceToStroke } from './ink.js';
 import { toPage } from './geometry.js';
@@ -19,13 +19,17 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs';
 
 console.info('Marginalia v 0.0.6');
+// Must stay in step with --c-* in index.html: the same six values are read from CSS
+// for chrome and written into member rows from here, and a reader's color is drawn
+// from the row. Each one is contrast-checked as UI text on the dark surfaces and as
+// dark text on its own fill — see README "Accessibility" before changing one.
 const COLORS = [
   { name: 'amber',   hex: '#E9A13B' },
   { name: 'cyan',    hex: '#3FBFC9' },
-  { name: 'magenta', hex: '#D95B9A' },
-  { name: 'violet',  hex: '#8A7BE0' },
+  { name: 'magenta', hex: '#E87CB0' },
+  { name: 'violet',  hex: '#9E90EA' },
   { name: 'lime',    hex: '#7FBF3F' },
-  { name: 'coral',   hex: '#E4663F' },
+  { name: 'coral',   hex: '#EE7F5C' },
 ];
 
 const $ = (s) => document.querySelector(s);
@@ -96,6 +100,10 @@ const other = () => members.find((m) => m.userId !== me.id) ?? null;
 const unitKey = (a) => a.pageNumber ?? a.spineIndex;
 // A human position label: an exact page for PDF, a rounded percent-through-book for EPUB.
 const posLabel = (p) => (p.page != null ? `p.${p.page}` : `${Math.round((p.percent ?? 0) * 100)}%`);
+// The same fact, said out loud. "p.5" is a fine thing to read on a 20px pill and a
+// poor thing for a screen reader to announce, and "%" is read inconsistently.
+const spokenPos = (p) =>
+  p.page != null ? `page ${p.page}` : `${Math.round((p.percent ?? 0) * 100)} percent through`;
 // What reader.goTo() needs, read off an annotation record. Each reader implementation
 // only looks at the fields that apply to its own format (page/yFrac vs cfi).
 const locatorFor = (a) => ({
@@ -125,11 +133,19 @@ function hideLoading() {
 
 /* -------------------------------------------------------------------- boot */
 async function boot() {
+  console.info(`Marginalia: ${describeEnv()}`);
   await store.init();
 
   if (isHosted()) {
     // In hosted mode identity comes from the session, not from a query param. ?me=
     // is a local-mode testing affordance and must not survive contact with real users.
+    // Say so, loudly: a silently-ignored ?me= looks exactly like a broken sign-in.
+    if (alias) {
+      console.warn(
+        `Marginalia: ignoring ?me=${alias} — identity comes from the signed-in session ` +
+          `in hosted mode. For the two-tab flow, use ?backend=local.`
+      );
+    }
     if (!store.user) return showAuth();
     me = {
       id: store.user.id,
@@ -148,7 +164,7 @@ async function boot() {
   bindNoteDialog();
   bindWhoDialog();
   $('#t-who').textContent = me.name;
-  await renderRecent();
+  await renderShelf();
   await handleInviteLink();
   // Only now is it known that no auth gate is coming (and whether an invite already
   // opened a book), so this is the first moment the drop screen can appear without
@@ -200,7 +216,7 @@ async function handleInviteLink() {
     history.replaceState({}, '', location.pathname);
     const docs = await store.listDocuments();
     const doc = docs.find((d) => d.id === id);
-    await openDoc(id, doc?.title ?? 'Shared book', doc?.format);
+    await openDoc(id, { title: doc?.title ?? 'Shared book', author: doc?.author, format: doc?.format });
     toast('You\u2019re in.');
   } catch (e) {
     toast(e.message);
@@ -221,28 +237,145 @@ async function copyInvite() {
   }
 }
 
-async function renderRecent() {
+/* -------------------------------------------------------------------- shelf
+   The library is the screen you actually live on: you add a book a handful of
+   times and open one every session. So the shelf gets the covers and the top of
+   the screen, and the drop zone shrinks to a strip beneath it — until there's
+   nothing on the shelf, when `data-empty` hands the screen back to the drop zone
+   because a first run has nothing else to say. */
+
+/**
+ * Two numbers off the title, used as the fallback jacket's gradient. Deterministic
+ * on purpose: a book keeps the same jacket across sessions and across the two
+ * readers, which is what makes it recognizable at a glance rather than decoration.
+ */
+function jacketColors(seed) {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  // Held dark and desaturated so the serif title on top stays well past 4.5:1 for
+  // every hue the hash can land on — see README "Accessibility".
+  return [`hsl(${hue} 28% 26%)`, `hsl(${(hue + 34) % 360} 32% 14%)`];
+}
+
+function bookCard(d, onOpen, onDelete) {
+  const card = document.createElement('div');
+  card.className = 'book';
+
+  const open = document.createElement('button');
+  open.className = 'book-open';
+  // The card is one button with one name. Cover, title, and author are all the same
+  // target, so the accessible name says the whole thing once instead of three times.
+  open.setAttribute('aria-label',
+    `Open ${d.title}${d.author ? `, by ${d.author}` : ''} (${d.format.toUpperCase()})`);
+
+  const cover = document.createElement('div');
+  cover.className = 'cover';
+  if (d.cover) {
+    const img = document.createElement('img');
+    img.src = d.cover;
+    // The card's own label already names the book; a repeated alt makes a screen
+    // reader say the title twice for one control.
+    img.alt = '';
+    cover.appendChild(img);
+  } else {
+    const [a, b] = jacketColors(d.title);
+    const jacket = document.createElement('div');
+    jacket.className = 'jacket';
+    jacket.style.setProperty('--jacket-a', a);
+    jacket.style.setProperty('--jacket-b', b);
+    jacket.innerHTML =
+      `<div class="jt">${escape(d.title)}</div>` +
+      (d.author ? `<div class="ja">${escape(d.author)}</div>` : '');
+    cover.appendChild(jacket);
+  }
+  const fmt = document.createElement('span');
+  fmt.className = 'fmt';
+  fmt.textContent = d.format.toUpperCase();
+  cover.appendChild(fmt);
+  open.appendChild(cover);
+
+  const title = document.createElement('div');
+  title.className = 'book-title';
+  title.textContent = d.title;
+  open.appendChild(title);
+
+  if (d.author) {
+    const author = document.createElement('div');
+    author.className = 'book-author';
+    author.textContent = d.author;
+    open.appendChild(author);
+  }
+
+  open.onclick = onOpen;
+  card.appendChild(open);
+
+  const del = document.createElement('button');
+  del.className = 'book-del';
+  del.title = 'Delete this book';
+  del.setAttribute('aria-label', `Delete ${d.title}`);
+  del.textContent = '✕';
+  del.onclick = onDelete;
+  card.appendChild(del);
+
+  return card;
+}
+
+async function renderShelf() {
   const docs = await store.listDocuments();
   const el = $('#recent');
   el.innerHTML = '';
-  // The whole shelf card hides when there's nothing on it — an empty "Your books"
-  // box under the drop zone reads as something having gone missing.
+  // Drives the whole start screen's layout: shelf-first, or drop-zone-first when
+  // there's nothing to open yet.
+  $('#start').dataset.empty = String(!docs.length);
   $('#shelf').hidden = !docs.length;
   if (!docs.length) return;
-  for (const d of docs.slice(0, 5)) {
-    const b = document.createElement('button');
-    b.className = 'recent-item';
-    b.innerHTML = `<span style="color:var(--muted)">${escape(d.title)}</span><span>reopen</span>`;
-    b.onclick = () => openDoc(d.id, d.title, d.format);
-    el.appendChild(b);
+
+  for (const d of docs) {
+    const card = bookCard(
+      d,
+      () => openDoc(d.id, d),
+      async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete "${d.title}"? This removes it — and its highlights and notes — for both of you.`)) return;
+        try {
+          await store.deleteDocument(d.id);
+          await renderShelf();
+        } catch (err) {
+          toast(err.message ?? 'That book didn’t delete.');
+        }
+      }
+    );
+    el.appendChild(card);
+
+    // After the card is on screen, not before: the jacket is a real answer, so the
+    // shelf never waits on a thumbnail it may not even be able to produce.
+    if (!d.cover) {
+      backfillCover(d).then((cover) => {
+        if (!cover || !card.isConnected) return;
+        const img = document.createElement('img');
+        img.src = cover;
+        img.alt = '';
+        card.querySelector('.cover .jacket')?.replaceWith(img);
+      });
+    }
   }
 }
 
 /* ------------------------------------------------------------------ opening */
 function bindStart() {
   const drop = $('#drop');
-  $('#pick').onclick = () => $('#file').click();
-  $('#file').onchange = (e) => e.target.files[0] && ingest(e.target.files[0]);
+  // Three doors to the same picker: the shelf header's "Add a book", the empty
+  // state's big button, and the inline link in the drop strip. Which one is on
+  // screen is a CSS question (see #start[data-empty]), not a JS one.
+  for (const id of ['#pick', '#pick-big', '#pick-alt']) {
+    $(id).onclick = () => $('#file').click();
+  }
+  $('#file').onchange = (e) => {
+    if (e.target.files[0]) ingest(e.target.files[0]);
+    // Cleared so picking the same file twice in a row still fires a change event.
+    e.target.value = '';
+  };
 
   for (const ev of ['dragenter', 'dragover']) {
     document.addEventListener(ev, (e) => {
@@ -267,13 +400,74 @@ function detectFormat(file) {
   return null;
 }
 
+/* ------------------------------------------------------------------- covers
+   The shelf wants a picture of the book, and both formats can give one: EPUB
+   names a cover image in its manifest, and a PDF's first page *is* its cover.
+   Both get downscaled to a thumbnail and stored as a data: URL beside the
+   title, so drawing the library is one IndexedDB read and no rendering. */
+const COVER_W = 300;
+
+/** Draw any image source into a 2:3-ish thumbnail and return a JPEG data: URL. */
+function thumbnail(source, w, h) {
+  const scale = Math.min(1, COVER_W / w);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(w * scale);
+  canvas.height = Math.round(h * scale);
+  const ctx = canvas.getContext('2d');
+  // White, not transparent: JPEG has no alpha, and a page rendered on a transparent
+  // canvas composites to black instead of paper.
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.82);
+}
+
+async function pdfCover(pdf) {
+  const page = await pdf.getPage(1);
+  const vp = page.getViewport({ scale: 1 });
+  const scale = Math.min(1, COVER_W / vp.width) * (window.devicePixelRatio > 1 ? 1.5 : 1);
+  const view = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(view.width);
+  canvas.height = Math.round(view.height);
+  const ctx = canvas.getContext('2d', { alpha: false });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport: view }).promise;
+  return canvas.toDataURL('image/jpeg', 0.82);
+}
+
+async function epubCover(book) {
+  const url = await book.coverUrl(); // null when the OPF declares no cover
+  if (!url) return null;
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = reject;
+      i.src = url;
+    });
+    return thumbnail(img, img.naturalWidth, img.naturalHeight);
+  } finally {
+    // coverUrl() mints a blob: URL that lives until the document does.
+    URL.revokeObjectURL(url);
+  }
+}
+
 /**
  * The book's own metadata beats its filename — files arrive named things like
  * "Title _ Subtitle -- Author -- Reprint, 2013 -- Publisher -- isbn13 ... .epub".
  * EPUB carries dc:title/dc:creator in the OPF; PDF has Title/Author in its Info
- * dictionary. Either can be missing or junk, so the filename stays as the fallback.
+ * dictionary. Any of it can be missing or junk, so the filename stays the fallback
+ * for the title and the other two are simply allowed to be null — the shelf draws a
+ * typeset jacket when there's no cover, which is why nothing here has to succeed.
+ *
+ * One open of the file, not two: the same parse that reads the metadata renders the
+ * cover, because opening a 10MB book is the expensive part and doing it twice on the
+ * way in is the slowest thing a user would feel.
  */
-async function bookTitle(file, format) {
+async function readBookMeta(file, format) {
+  const out = { title: null, author: null, cover: null };
   try {
     if (format === 'epub') {
       const ePub = (await import('https://esm.sh/epubjs@0.3.93')).default;
@@ -282,22 +476,48 @@ async function bookTitle(file, format) {
       // pipeline (navigation, displayOptions) is still in flight throws inside epub.js.
       await book.ready;
       const meta = await book.loaded.metadata;
+      out.title = meta?.title?.trim() || null;
+      out.author = meta?.creator?.trim() || null;
+      out.cover = await epubCover(book).catch(() => null);
       book.destroy();
-      const t = meta?.title?.trim();
-      const a = meta?.creator?.trim();
-      if (t) return a ? `${t} — ${a}` : t;
     } else {
       const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
       const { info } = await pdf.getMetadata().catch(() => ({ info: {} }));
+      out.title = info?.Title?.trim() || null;
+      out.author = info?.Author?.trim() || null;
+      out.cover = await pdfCover(pdf).catch(() => null);
       await pdf.destroy();
-      const t = info?.Title?.trim();
-      const a = info?.Author?.trim();
-      if (t) return a ? `${t} — ${a}` : t;
     }
   } catch {
     /* unreadable metadata is not an error — the filename below still works */
   }
-  return file.name.replace(/\.(pdf|epub)$/i, '');
+  out.title ??= file.name.replace(/\.(pdf|epub)$/i, '');
+  return out;
+}
+
+/**
+ * Books shelved before covers existed have none stored. Rather than leave them as
+ * permanent fallback jackets, derive one from the bytes already on this device the
+ * first time the shelf draws them, and write it back so it's paid for once.
+ *
+ * PDF only, and local mode only. Hosted books have no local bytes to re-read (a
+ * cover would mean pulling the whole file back down), and an EPUB backfill would
+ * mean loading epub.js on the library screen for a session that may never open one.
+ * Both cases keep the jacket, which is a fallback, not a failure.
+ */
+async function backfillCover(doc) {
+  if (doc.cover || doc.format !== 'pdf' || !store.saveDocumentCover) return null;
+  try {
+    const source = await store.getDocumentSource(doc.id);
+    if (!source?.data) return null;
+    const pdf = await pdfjsLib.getDocument({ data: source.data }).promise;
+    const cover = await pdfCover(pdf);
+    await pdf.destroy();
+    await store.saveDocumentCover(doc.id, { cover });
+    return cover;
+  } catch {
+    return null; // a book that won't render a thumbnail still opens fine
+  }
 }
 
 async function ingest(file) {
@@ -310,16 +530,23 @@ async function ingest(file) {
   // book going up to storage, which is the longest wait in the app.
   showLoading(isHosted() ? 'Uploading…' : 'Opening…');
   try {
-    const { docId: id, title } = await store.putDocument(file, format, await bookTitle(file, format));
-    await openDoc(id, title, format);
+    const meta = await readBookMeta(file, format);
+    const { docId: id, title, author } = await store.putDocument(file, format, meta);
+    await openDoc(id, { title, author, format });
   } catch (e) {
     hideLoading();
     toast(e.message ?? 'That book didn’t upload.');
   }
 }
 
-async function openDoc(id, title, format = 'pdf') {
-  // Also covers reopening from the recent list and landing via an invite link, which
+/**
+ * `doc` is a shelf record — {title, author, format} — not a bare title, because
+ * every call site already has the whole row and the topbar wants the author too.
+ */
+async function openDoc(id, doc = {}) {
+  const { title = 'Untitled', author = null } = doc;
+  const format = doc.format ?? 'pdf';
+  // Also covers reopening from the shelf and landing via an invite link, which
   // don't go through ingest().
   showLoading('Opening…');
   unsubscribe?.();
@@ -334,6 +561,8 @@ async function openDoc(id, title, format = 'pdf') {
 
   docId = id;
   $('#title').textContent = title;
+  $('#byline').textContent = author ?? '';
+  $('#byline').hidden = !author;
   $('#start').hidden = true;
   $('#t-home').disabled = false;
   app.dataset.format = reader.kind;
@@ -382,6 +611,7 @@ async function openDoc(id, title, format = 'pdf') {
   };
   reader.renderAnnotations = renderAnnotations;
   syncZoomUI();
+  await applyTextVerdict();
 
   unsubscribe = store.subscribe(id, onRemoteChange);
 
@@ -416,8 +646,15 @@ function closeDoc() {
   progress = {};
   closePopover();
   hideLoading();
+  hideNotice();
+  // Before setTool, which refuses to select a disabled tool — a scan closed while
+  // Select was greyed out would otherwise leave the library stuck in Draw.
+  $('#t-select').disabled = false;
+  $('#t-select').title = 'Select text to highlight';
   setTool('select');
   $('#title').textContent = '';
+  $('#byline').textContent = '';
+  $('#byline').hidden = true;
   $('#t-home').disabled = true;
   $('#t-invite').hidden = true;
   $('#t-ink').disabled = false;
@@ -428,12 +665,13 @@ function closeDoc() {
   $('#spine-bot').textContent = '—';
   $('#track').querySelectorAll('.tick, .marker').forEach((n) => n.remove());
   $('#gap').textContent = '';
+  $('#between').hidden = true;
   $('#jump-label').textContent = 'Find them';
   $('#note-count').textContent = '';
   $('#notes').innerHTML = '';
   delete app.dataset.format;
   $('#start').hidden = false;
-  renderRecent();
+  renderShelf();
 }
 
 /* --------------------------------------------------------- remote changes */
@@ -471,10 +709,92 @@ function onRemoteChange(change) {
   }
 }
 
+/* ------------------------------------------------- books with no text layer */
+
+/**
+ * A scanned PDF carries pictures of words, not words. Nothing in it can be selected,
+ * so nothing in it can be highlighted or noted — only inked. That used to be silent:
+ * you dragged across a paragraph, got nothing, and had no way to tell a scan from a
+ * bug in the reader.
+ *
+ * Two answers, for two different books, because one check can't cover both:
+ *   - here, once per book, for a scan (uniformly image-only — the common case);
+ *   - `openNoTextPopover`, per drag, for the plate section inside a typeset book,
+ *     which no book-level sample can see.
+ */
+async function applyTextVerdict() {
+  const sel = $('#t-select');
+  hideNotice();
+  sel.disabled = false;
+  sel.title = 'Select text to highlight';
+  // EPUB is always text — that's what reflowable means.
+  if (reader.kind !== 'pdf') return;
+
+  const opened = docId;
+  if (await reader.probeText()) return;
+  if (docId !== opened) return; // book closed or swapped while we were sampling
+
+  // Same treatment Draw gets on EPUB, and for the same reason: a tool that cannot
+  // work should look unavailable and say why, not fail quietly when you use it.
+  sel.disabled = true;
+  sel.title = 'This scan has no text layer — there’s nothing to select';
+  // Not a preference being overridden — Select is disabled, so leaving it active
+  // would leave the toolbar pointing at a tool that does nothing.
+  setTool('ink');
+  showNotice(
+    'This scan has no text layer, so there’s nothing to highlight.',
+    'Ink still works — Draw is on.'
+  );
+}
+
+function showNotice(msg, sub) {
+  $('#notice-msg').textContent = msg;
+  $('#notice-sub').textContent = sub;
+  $('#notice').hidden = false;
+}
+
+function hideNotice() {
+  $('#notice').hidden = true;
+}
+
+/**
+ * The per-page half: shown where the cursor lifted, after a drag that could only have
+ * been an attempt to highlight. Reactive on purpose — a typeset book with twenty
+ * scanned plates shouldn't wear a warning for the other 300 pages.
+ */
+function openNoTextPopover(x, y) {
+  const pop = $('#pop');
+  pending = null;
+  pop.dataset.kind = 'no-text';
+  pop.innerHTML =
+    '<div class="why">' + IMAGE_GLYPH +
+    '<div><b>Nothing to select here</b>' +
+    '<span>This page is an image — there’s no text layer to highlight.</span></div>' +
+    '</div><hr>';
+  const draw = document.createElement('button');
+  draw.className = 'act';
+  draw.innerHTML =
+    '<svg viewBox="0 0 24 24" style="width:13px;height:13px;fill:none;stroke:currentColor;' +
+    'stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round">' +
+    '<path d="M17 3l4 4L8 20l-5 1 1-5z"/></svg>Draw on it instead<span class="key">D</span>';
+  draw.onclick = () => {
+    setTool('ink');
+    closePopover();
+  };
+  pop.appendChild(draw);
+  placePopover(x, y);
+}
+
 /* ------------------------------------------------------------------- tools */
 function setTool(t) {
+  // Select is disabled on a book with no text layer, and the keyboard shortcut has to
+  // respect that as much as the button does.
+  if (t === 'select' && $('#t-select').disabled) return;
   tool = t;
   app.dataset.ink = t === 'ink' ? 'on' : 'off';
+  // `data-ink` is the two-state switch the layers key off; `data-tool` carries the tool
+  // itself, which is what the pencil/eraser cursors need (erase isn't "ink off").
+  app.dataset.tool = t;
   $('#t-select').ariaPressed = String(t === 'select');
   $('#t-ink').ariaPressed = String(t === 'ink');
   $('#t-erase').ariaPressed = String(t === 'erase');
@@ -506,6 +826,9 @@ function bindTools() {
 
   $('#t-who').onclick = openWhoDialog;
   $('#t-invite').onclick = copyInvite;
+  // Dismissing is per-open, not remembered: reopening a scan is exactly when you'd
+  // want reminding, and the greyed-out Select is the standing reminder in between.
+  $('#notice-ok').onclick = hideNotice;
 
   document.addEventListener('keydown', (e) => {
     if (e.target.matches('input, textarea')) return;
@@ -554,19 +877,49 @@ function handleSelection(sel) {
 }
 
 function bindSelection() {
+  // Where the current gesture started, so a drag can be told from a click. Only a drag
+  // is evidence someone was trying to select something.
+  let from = null;
+
   // Click-away closes the popover. This fires on the way *into* any new gesture —
   // including the drag that will open the next popover — so the stale one never
   // lingers under it. Clicks on the popover itself are the one exception.
   document.addEventListener('pointerdown', (e) => {
+    from = { x: e.clientX, y: e.clientY };
     if (!e.target.closest('#pop')) closePopover();
   });
 
   document.addEventListener('pointerup', (e) => {
+    const start = from;
+    from = null;
     if (tool !== 'select' || e.pointerType === 'pen' || reader?.kind === 'epub') return;
     // Let the browser finish resolving the selection before reading it. EPUB never
     // reaches here — a pointerup inside a chapter's iframe doesn't bubble to this
     // top-document listener, so it arrives via reader.onSelectionChange instead.
-    setTimeout(() => handleSelection(readSelection(document)), 0);
+    setTimeout(() => {
+      const sel = readSelection(document);
+      if (sel) return handleSelection(sel);
+      // Empty-handed. If they dragged across a page we know has no text layer, that's
+      // not an idle click — it's the gesture this whole feature exists to answer.
+      const pageEl = e.target.closest?.('[data-page]');
+      const dragged = start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 6;
+      if (dragged && pageEl && reader?.pageHasText?.(Number(pageEl.dataset.page)) === false) {
+        openNoTextPopover(e.clientX, e.clientY);
+        return;
+      }
+      handleSelection(null);
+      // A click that selected nothing is the "open what's under me" gesture. It has to
+      // be hit-tested here rather than handled by a click listener on the .hl rect
+      // itself: .hl-layer sits at z-index 2, under .text-layer at 3, because the text
+      // layer has to stay on top to own selection. Nothing ever reaches a rect.
+      // (EPUB is the exception and returns above — its layer is injected into the
+      // chapter's own document, above the text, so there the rect's own onclick fires.)
+      if (!dragged && pageEl) {
+        const page = Number(pageEl.dataset.page);
+        const hit = hitTest(annotations, page, toPage(e.clientX, e.clientY, pageEl.getBoundingClientRect()));
+        if (hit) openNoteDialog(hit);
+      }
+    }, 0);
   });
 
   $('#pages').addEventListener('pointerdown', (e) => {
@@ -582,6 +935,7 @@ function bindSelection() {
 function openPopover(sel, x, y) {
   const pop = $('#pop');
   pop.innerHTML = '';
+  delete pop.dataset.kind;
   // Your color is a standing preference (set in the who-dialog), not a per-highlight
   // decision — the popover shows it, it doesn't ask.
   const hl = document.createElement('button');
@@ -594,7 +948,12 @@ function openPopover(sel, x, y) {
   note.textContent = 'Add note';
   note.onclick = () => createHighlight(sel, me.color, true);
   pop.appendChild(note);
+  placePopover(x, y);
+}
 
+/** Open the popover at (x, y) in viewport pixels, kept inside the window. */
+function placePopover(x, y) {
+  const pop = $('#pop');
   pop.dataset.open = 'true';
   const r = pop.getBoundingClientRect();
   pop.style.left = Math.min(Math.max(8, x - r.width / 2), innerWidth - r.width - 8) + 'px';
@@ -603,6 +962,8 @@ function openPopover(sel, x, y) {
 
 function closePopover() {
   $('#pop').dataset.open = 'false';
+  // Without this the next highlight popover inherits the refusal card's layout.
+  delete $('#pop').dataset.kind;
   pending = null;
 }
 
@@ -633,6 +994,27 @@ async function createHighlight(sel, color, withNote) {
   renderPanel();
   renderSpine();
   if (withNote) openNoteDialog(a);
+}
+
+/**
+ * Remove one highlight — the counterpart to erase() for ink, and the single path
+ * behind both entry points (the note dialog's button and the margin panel's).
+ *
+ * Guarded on ownership even though both callers already hide the affordance from
+ * a reader who doesn't own the row: hosted mode's RLS would reject the write
+ * anyway, and local mode has no RLS to fall back on.
+ *
+ * Like every other write here this doesn't touch `annotations` directly — the
+ * store's change feed does, so the local list keeps its one path in. The renders
+ * below are the same optimistic repaint saveAnnotation's callers do; the feed's
+ * echo lands on an already-correct view.
+ */
+async function removeHighlight(a) {
+  if (a.userId !== me.id) return;
+  await store.deleteAnnotation(a.id);
+  renderAnnotations(unitKey(a));
+  renderPanel();
+  renderSpine();
 }
 
 /* --------------------------------------------------------------------- ink */
@@ -730,7 +1112,37 @@ function renderPanel() {
       `<span>${posLabel({ page: a.pageNumber, percent: a.percent })}</span></div>` +
       (a.text ? `<div class="note-quote">${escape(a.text)}</div>` : '') +
       (a.note ? `<div class="note-body">${escape(a.note)}</div>` : '');
-    div.onclick = () => reader.goTo(locatorFor(a), true);
+    // Jump first, then open it — awaited, so the passage is on screen behind the dialog
+    // rather than arriving after you dismiss it (on EPUB, goTo has to render a chapter
+    // before it can scroll, so that wait is real).
+    //
+    // Unless you're already there. Scrolling the page you're reading out from under
+    // yourself to land on the same page is motion that says nothing, and it costs you
+    // the spot you were actually looking at.
+    //
+    // Only PDF can answer that: `currentUnit()` is a page there and null on EPUB, whose
+    // only unit is a chapter — too coarse to mean "already looking at it." Null never
+    // equals a unitKey, so EPUB jumps every time, which is the right default when the
+    // passage could be thousands of words down the chapter you're standing in.
+    div.onclick = async () => {
+      if (unitKey(a) !== reader.currentUnit()) await reader.goTo(locatorFor(a), true);
+      openNoteDialog(a);
+    };
+
+    // Only over your own rows. The other reader's margin is theirs to keep — and
+    // RLS would refuse the write in hosted mode regardless.
+    if (a.userId === me.id) {
+      const del = document.createElement('button');
+      del.className = 'note-del';
+      del.textContent = '×';
+      del.title = 'Remove this highlight';
+      del.setAttribute('aria-label', `Remove highlight${a.text ? ': ' + a.text.slice(0, 40) : ''}`);
+      del.onclick = (e) => {
+        e.stopPropagation(); // the card behind it jumps to the page; the × must not
+        removeHighlight(a);
+      };
+      div.appendChild(del);
+    }
     el.appendChild(div);
   }
   void withText;
@@ -759,8 +1171,18 @@ function renderSpine() {
     m.className = 'marker' + (isMe ? '' : ' them');
     m.style.top = (p.percent ?? 0) * 100 + '%';
     m.style.background = colorOf(p.userId);
+    // Your own marker is a pill that sizes to its label, so the label can be as long
+    // as it needs to be — "p.5", "p.147" and "100%" all fit, which a fixed-diameter
+    // circle could not. Theirs is a bare dot in its own lane: two labels on one rail
+    // collide exactly when you're reading the same part of the book.
     m.textContent = isMe ? posLabel(p) : '';
-    m.title = `${nameOf(p.userId)} — ${posLabel(p)}`;
+    const where = `${nameOf(p.userId)} — ${posLabel(p)}`;
+    m.title = isMe ? where : `${where}. Jump to them.`;
+    // The dot has no text at all, and the pill's text is an abbreviation ("p.5"), so
+    // neither is a usable accessible name on its own.
+    m.setAttribute('aria-label', isMe
+      ? `You are at ${spokenPos(p)}`
+      : `${nameOf(p.userId)} is at ${spokenPos(p)}. Jump to them.`);
     m.onclick = () => reader.goTo(p, true);
     track.appendChild(m);
   }
@@ -771,6 +1193,7 @@ function renderSpine() {
   const mine = progress[me.id];
   const theirs = o && progress[o.userId];
   const gap = $('#gap');
+  const between = $('#between');
   const jump = $('#jump-label');
   const together = !!(mine && theirs &&
     (mine.page != null ? mine.page === theirs.page : mine.cfi === theirs.cfi));
@@ -778,17 +1201,42 @@ function renderSpine() {
   jump.textContent = theirs
     ? together ? 'Together' : `${nameOf(o.userId)} · ${posLabel(theirs)}`
     : 'Find them';
+  $('#t-jump').setAttribute('aria-label', theirs
+    ? together
+      ? `You are both at ${spokenPos(theirs)}`
+      : `Jump to ${nameOf(o.userId)}, at ${spokenPos(theirs)}`
+    : 'Find the other reader');
 
   if (mine && theirs) {
     const usingPages = mine.page != null && theirs.page != null;
     const d = usingPages
       ? Math.abs(mine.page - theirs.page)
       : Math.abs((mine.percent ?? 0) - (theirs.percent ?? 0));
-    gap.textContent = d === 0 ? 'together' : usingPages ? `${d}p` : `${Math.round(d * 100)}%`;
-    const mid = ((mine.percent ?? 0) + (theirs.percent ?? 0)) / 2;
-    gap.style.top = `calc(40px + ${mid} * (100% - 80px) - 5px)`;
+    const a = mine.percent ?? 0;
+    const b = theirs.percent ?? 0;
+    const span = Math.abs(a - b);
+
+    // Paint the stretch of book between you. The number says how far apart; the
+    // painted span says *where* that distance is, which is the thing a rail can
+    // show and a label can't.
+    between.hidden = span < 0.005;
+    between.style.top = Math.min(a, b) * 100 + '%';
+    between.style.height = span * 100 + '%';
+    between.style.background =
+      `linear-gradient(${a <= b ? 180 : 0}deg, ${colorOf(me.id)}, ${colorOf(o.userId)})`;
+
+    // The label sits at the midpoint, which is where your own pill sits when the two
+    // of you are close — so below a tenth of the book it's dropped rather than drawn
+    // underneath the pill. Nothing is lost: at that distance the topbar already says
+    // "Together", and the painted span still shows it.
+    gap.textContent = span < 0.1
+      ? ''
+      : d === 0 ? 'together' : usingPages ? `${d}p` : `${Math.round(d * 100)}%`;
+    const mid = (a + b) / 2;
+    gap.style.top = `calc(44px + ${mid} * (100% - 88px) - 5px)`;
   } else {
     gap.textContent = '';
+    between.hidden = true;
   }
 }
 
@@ -804,7 +1252,7 @@ function openNoteDialog(a) {
   const own = a.userId === me.id;
   ta.readOnly = !own;
   ta.placeholder = own ? 'What did you think?' : `${nameOf(a.userId)} left no note here.`;
-  $('#note-del').style.display = own ? '' : 'none';
+  $('#note-delete').style.display = own ? '' : 'none';
   dlg.showModal();
   if (own) ta.focus();
 }
@@ -821,12 +1269,7 @@ function bindNoteDialog() {
       renderAnnotations(unitKey(a));
       renderPanel();
     }
-    if (dlg.returnValue === 'delete') {
-      await store.deleteAnnotation(a.id);
-      renderAnnotations(unitKey(a));
-      renderPanel();
-      renderSpine();
-    }
+    if (dlg.returnValue === 'delete') await removeHighlight(a);
     void e;
   });
 }

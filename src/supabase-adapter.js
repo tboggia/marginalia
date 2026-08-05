@@ -92,14 +92,17 @@ export class SupabaseStore {
     });
   }
 
-  async putDocument(file, format, title) {
+  async putDocument(file, format, meta = {}) {
     const bytes = await file.arrayBuffer();
     const hash = await sha256(bytes);
 
     const { data: found } = await this.sb
       .from('documents').select('*').eq('sha256', hash).maybeSingle();
     if (found) {
-      return { docId: found.id, title: found.title, format: found.format, storagePath: found.storage_path };
+      return {
+        docId: found.id, title: found.title, author: found.author ?? null,
+        format: found.format, storagePath: found.storage_path,
+      };
     }
 
     // No upsert, deliberately. `upsert: true` sends x-upsert, which turns the write
@@ -122,14 +125,22 @@ export class SupabaseStore {
     const { data, error } = await this.sb
       .from('documents')
       .insert({
-        title: title ?? file.name.replace(/\.(pdf|epub)$/i, ''),
+        title: meta.title ?? file.name.replace(/\.(pdf|epub)$/i, ''),
+        author: meta.author ?? null,
+        // The cover rides in the row, not the bucket: it's a ~30KB data: URL, and a
+        // second storage object would need its own path convention, its own RLS
+        // policy, and its own signed URL on every shelf render to show a thumbnail.
+        cover: meta.cover ?? null,
         storage_path: path, sha256: hash, format,
       })
       .select().single();
     if (error) throw error;
 
     await this.saveMember(data.id, { userId: this.user.id, name: 'You', color: '#E9A13B' });
-    return { docId: data.id, title: data.title, format: data.format, storagePath: path };
+    return {
+      docId: data.id, title: data.title, author: data.author ?? null,
+      format: data.format, storagePath: path,
+    };
   }
 
   /**
@@ -148,10 +159,32 @@ export class SupabaseStore {
 
   async listDocuments() {
     const { data } = await this.sb
-      .from('documents').select('id,title,format,created_at').order('created_at', { ascending: false });
+      .from('documents')
+      .select('id,title,author,cover,format,created_at')
+      .order('created_at', { ascending: false });
     return (data ?? []).map((d) => ({
-      id: d.id, title: d.title, format: d.format, createdAt: Date.parse(d.created_at),
+      id: d.id, title: d.title, author: d.author ?? null, cover: d.cover ?? null,
+      format: d.format, createdAt: Date.parse(d.created_at),
     }));
+  }
+
+  /**
+   * Hard delete. The storage object has to go first: once the `documents` row is gone,
+   * `delete_books`'s policy (which joins back to `documents` to check membership) has
+   * nothing left to join against, and the object would be orphaned in the bucket
+   * forever. Deleting the row after cascades memberships/progress/annotations via the
+   * `on delete cascade` foreign keys in schema.sql — no client-side cleanup needed there.
+   */
+  async deleteDocument(docId) {
+    const { data: doc, error: findErr } = await this.sb
+      .from('documents').select('storage_path').eq('id', docId).single();
+    if (findErr) throw findErr;
+
+    const { error: storageErr } = await this.sb.storage.from('books').remove([doc.storage_path]);
+    if (storageErr) throw storageErr;
+
+    const { error } = await this.sb.from('documents').delete().eq('id', docId);
+    if (error) throw error;
   }
 
   async getInviteCode(docId) {

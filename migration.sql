@@ -15,6 +15,12 @@ alter table documents add column if not exists
   format text not null default 'pdf' check (format in ('pdf', 'epub'));
 alter table documents add column if not exists epub_locations jsonb;
 
+-- The library screen shows covers. Both are nullable and both stay null on books that
+-- were uploaded before this existed — the shelf falls back to a typeset jacket built
+-- from the title, so old rows need no backfill to look right.
+alter table documents add column if not exists author text;
+alter table documents add column if not exists cover  text;
+
 -- ----------------------------------------------------------------- progress
 -- EPUB has no fixed page, so page/y_frac must be allowed to be null and a cfi carries
 -- the position instead. `percent` is what the spine rail reads for both formats.

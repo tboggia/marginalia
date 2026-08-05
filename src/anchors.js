@@ -121,7 +121,9 @@ export function normalizeText(s) {
 export function hitTest(annotations, pageNumber, pt, pad = 0.004) {
   for (let i = annotations.length - 1; i >= 0; i--) {
     const a = annotations[i];
-    if (a.pageNumber !== pageNumber || a.type !== 'highlight') continue;
+    // No rects means an EPUB highlight (it carries a cfi instead) — not addressable
+    // by a PDF page coordinate, and iterating it would throw.
+    if (a.pageNumber !== pageNumber || a.type !== 'highlight' || !a.rects) continue;
     for (const r of a.rects) {
       if (
         pt.x >= r.x - pad && pt.x <= r.x + r.w + pad &&

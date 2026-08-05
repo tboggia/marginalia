@@ -53,8 +53,8 @@ Then sign in as a third account in a private window and confirm you can't see th
 
 Any static host. The app is plain files — no build, no server, no Node.
 
-**Cloudflare Pages / Netlify:** drag the `shared-reader` folder onto their deploy page.
-Done. Set a custom domain if you want a URL you can remember.
+**Cloudflare Pages / Netlify:** drag this folder onto their deploy page. Done. Set a
+custom domain if you want a URL you can remember.
 
 **GitHub Pages:** see the section below — it has a couple of specifics worth knowing.
 

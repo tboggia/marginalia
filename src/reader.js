@@ -5,7 +5,9 @@
  *   canvas.pdf        the rendered page
  *   div.hl-layer      highlight rects, mix-blend-mode: multiply
  *   div.text-layer    transparent text, the only thing that receives selection
- *   canvas.ink        everyone's strokes; pointer-events only while a pen is down
+ *   canvas.ink        everyone's strokes; pointer-events: none, it only paints.
+ *                     Pen/ink input is bound to .page itself, so it arrives by
+ *                     bubbling without this canvas shadowing the text layer.
  *
  * All four are absolutely positioned at 0,0 and sized identically, so a normalized
  * coordinate means the same thing in every one of them.
@@ -14,6 +16,30 @@
 import { attachInk, redraw } from './ink.js';
 
 const RENDER_MARGIN = 2; // pages either side of the viewport kept live
+
+/** How many pages `probeText` looks at before calling a book image-only. */
+const TEXT_PROBE_SAMPLES = 6;
+
+/* The "this is a picture" glyph, in the toolbar's icon language: 24x24, stroked,
+   no fill. Deliberately not struck through — the words next to it carry the "and
+   so you can't highlight it" half, and a slashed frame reads as a prohibition. */
+export const IMAGE_GLYPH =
+  '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+  '<rect x="3" y="4.5" width="18" height="15" rx="2"/>' +
+  '<circle cx="8.6" cy="9.6" r="1.5"/>' +
+  '<path d="M3.4 16.6l4.6-4.1 3.4 3 3-2.6 6.2 5.1"/>' +
+  '</svg>';
+
+/**
+ * Does a page's text content contain anything a person could select?
+ *
+ * Not `items.length` — a scan run through a failed OCR pass emits plenty of items
+ * whose `str` is empty or whitespace. Those pages look texty by count and select
+ * like a photograph, which is exactly the case this whole feature exists to name.
+ */
+function hasSelectableText(content) {
+  return content.items.some((i) => i.str && i.str.trim());
+}
 
 export class Reader {
   kind = 'pdf';
@@ -75,6 +101,7 @@ export class Reader {
       this.pages.push({ num: n, el, size, rendered: false, sized: n === 1 });
 
       attachInk(
+        el,
         el.querySelector('canvas.ink'),
         n,
         () => this.getInkState(),
@@ -139,6 +166,16 @@ export class Reader {
       }
     }
     return { page: this.pageCount, yFrac: 0, percent: 1 };
+  }
+
+  /**
+   * The unit an annotation would group under if it were made right now — the page at
+   * the top of the viewport. Lets a caller ask "am I already looking at this?" without
+   * knowing which format it's holding. EpubReader returns null: see the note there for
+   * why a chapter is the wrong answer to that question.
+   */
+  currentUnit() {
+    return this.position().page;
   }
 
   /** Where a `{page}` (or a record that has one, like an annotation) sits in the book. */
@@ -263,7 +300,10 @@ export class Reader {
       return; // cancelled by a zoom or a fast scroll; nothing to clean up
     }
 
-    await this._renderTextLayer(page, viewport, p.el.querySelector('.text-layer'));
+    this._markText(
+      p,
+      await this._renderTextLayer(page, viewport, p.el.querySelector('.text-layer'))
+    );
     redraw(ink, ink._strokes ?? []);
     this.renderAnnotations?.(p.num);
   }
@@ -276,9 +316,9 @@ export class Reader {
   async _renderTextLayer(page, viewport, layer) {
     const content = await page.getTextContent();
     layer.innerHTML = '';
-    if (!content.items.length) {
+    if (!hasSelectableText(content)) {
       layer.dataset.empty = 'true';
-      return;
+      return false;
     }
     delete layer.dataset.empty;
 
@@ -315,6 +355,55 @@ export class Reader {
         m.span.style.transformOrigin = '0% 0%';
       }
     }
+    return true;
+  }
+
+  /**
+   * Record whether a page turned out to be selectable, and stamp the ones that
+   * aren't. The chip is created lazily and never removed — a page's text layer is a
+   * fact about the file, so it can't change under us, and building 900 of them up
+   * front to hide 900 of them would be wasted work on a book that's mostly text.
+   */
+  _markText(p, hasText) {
+    p.hasText = hasText;
+    p.el.dataset.text = hasText ? 'yes' : 'none';
+    if (hasText || p.el.querySelector('.no-text')) return;
+    const chip = document.createElement('div');
+    chip.className = 'no-text';
+    chip.title = 'No text layer on this page — there’s nothing to select. Ink still works.';
+    chip.innerHTML = IMAGE_GLYPH + '<span>Image only</span>';
+    p.el.appendChild(chip);
+  }
+
+  /** Has page `n` been found to carry selectable text? `undefined` until it renders. */
+  pageHasText(n) {
+    return this.pages[n - 1]?.hasText;
+  }
+
+  /**
+   * Is there a text layer anywhere in this book? Sampled, not exhaustive: one
+   * `getTextContent` per page is far too much for a 900-page book, and the question
+   * being answered is the coarse one ("did someone hand us a scan?").
+   *
+   * Biased toward saying yes on purpose — one page with text is enough to return
+   * true. A scan whose title page happens to carry an OCR'd line gets no book-level
+   * verdict, and the per-page path picks it up instead. That direction of error
+   * costs a user nothing; the other one tells them their book is unhighlightable
+   * when it isn't.
+   */
+  async probeText(samples = TEXT_PROBE_SAMPLES) {
+    const step = Math.max(1, Math.floor(this.pageCount / samples));
+    for (let n = 1; n <= this.pageCount; n += step) {
+      try {
+        const content = await (await this.pdf.getPage(n)).getTextContent();
+        // Page 1 is already parsed by load(), and a normal book returns here on the
+        // first iteration — only an actual scan pays for all six samples.
+        if (hasSelectableText(content)) return true;
+      } catch {
+        // A page that won't parse tells us nothing either way; keep sampling.
+      }
+    }
+    return false;
   }
 
   pageEl(n) {
