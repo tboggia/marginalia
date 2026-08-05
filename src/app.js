@@ -365,10 +365,10 @@ async function renderShelf() {
 /* ------------------------------------------------------------------ opening */
 function bindStart() {
   const drop = $('#drop');
-  // Three doors to the same picker: the shelf header's "Add a book", the empty
-  // state's big button, and the inline link in the drop strip. Which one is on
-  // screen is a CSS question (see #start[data-empty]), not a JS one.
-  for (const id of ['#pick', '#pick-big', '#pick-alt']) {
+  // Two doors to the same picker: the shelf header's "Add a book" and the empty
+  // state's big button. Which one is on screen is a CSS question (see
+  // #start[data-empty]), not a JS one.
+  for (const id of ['#pick', '#pick-big']) {
     $(id).onclick = () => $('#file').click();
   }
   $('#file').onchange = (e) => {
