@@ -238,7 +238,7 @@ function showAuth() {
 async function handleInviteLink() {
   const code = params.get('join');
   if (!code) return;
-  if (!isHosted()) return toast('Invite links need a backend. See DEPLOY.md.');
+  if (!isHosted()) return toast('This copy of Marginalia runs only in this browser, so there’s nobody to invite.');
 
   try {
     const { kind, docId: id } = await store.redeemInvite(code, me.name);
@@ -269,38 +269,51 @@ async function handleInviteLink() {
  * is what replaced the old two-reader cap: the cap used to be the thing that made a
  * leaked link stop mattering, and with the cap gone the token has to carry that itself.
  */
-async function copyInvite() {
-  if (!isHosted()) return toast('Invite links need a backend. See DEPLOY.md.');
+async function copyInviteFrom(btn, invite) {
+  if (!isHosted()) {
+    return toast('This copy of Marginalia runs only in this browser, so there’s nobody to invite.');
+  }
+  btn.disabled = true;
   try {
-    const { code } = await store.createInvite({ kind: 'book', docId });
-    await shareLink(code, 'Invite link copied. It works once, and expires in two weeks.');
+    const { code } = await store.createInvite(invite);
+    const url = location.origin + location.pathname + '?join=' + code;
+    try {
+      await navigator.clipboard.writeText(url);
+      flashCopied(btn);
+    } catch {
+      // Clipboard needs a secure context and a user gesture; if either is missing,
+      // show the link rather than silently doing nothing.
+      prompt('Send them this link:', url);
+    }
   } catch (e) {
-    toast(e.message);
+    // Same top-layer problem: an error raised from inside the share sheet can't be a toast.
+    if ($('#share-dlg').open) shareMsg(e.message, 'error');
+    else toast(e.message);
+  } finally {
+    btn.disabled = false;
   }
 }
 
-/** A connection invite \u2014 no book attached, just the handshake. */
-async function copyConnectInvite() {
-  if (!isHosted()) return toast('Invite links need a backend. See DEPLOY.md.');
-  try {
-    const { code } = await store.createInvite({ kind: 'connect' });
-    await shareLink(code, 'Invite link copied. It works once, and expires in two weeks.');
-  } catch (e) {
-    toast(e.message);
-  }
+const copyInvite = () => copyInviteFrom($('#share-invite'), { kind: 'book', docId });
+const copyConnectInvite = () => copyInviteFrom($('#people-invite'), { kind: 'connect' });
+
+/**
+ * Confirmation lands on the button rather than in a toast. A <dialog> renders in the
+ * browser's top layer, above every z-index on the page, so a toast fired from inside the
+ * share sheet came up behind its own modal.
+ */
+function flashCopied(btn) {
+  const label = btn.querySelector('.lbl');
+  btn._label ??= label.textContent;
+  label.textContent = 'Copied — one use, 2 weeks';
+  btn.dataset.copied = 'true';
+  clearTimeout(btn._copyTimer);
+  btn._copyTimer = setTimeout(() => {
+    label.textContent = btn._label;
+    delete btn.dataset.copied;
+  }, 3200);
 }
 
-async function shareLink(code, message) {
-  const url = location.origin + location.pathname + '?join=' + code;
-  try {
-    await navigator.clipboard.writeText(url);
-    toast(message);
-  } catch {
-    // Clipboard needs a secure context and a user gesture; if either is missing,
-    // show the link rather than silently doing nothing.
-    prompt('Send them this link:', url);
-  }
-}
 
 /* -------------------------------------------------------------------- shelf
    The library is the screen you actually live on: you add a book a handful of
@@ -324,32 +337,23 @@ function jacketColors(seed) {
 }
 
 /**
- * Two letters standing in for a person where there's no room for a name. Array.from,
- * not slice: a name starting with an emoji or any astral character would otherwise be
- * cut through the middle of a surrogate pair and render as a replacement glyph.
- */
-function initials(name) {
-  const parts = String(name ?? '').trim().split(/\s+/).filter(Boolean);
-  if (!parts.length) return '?';
-  const first = Array.from(parts[0]);
-  if (parts.length === 1) return first.slice(0, 2).join('').toUpperCase();
-  return (first[0] + Array.from(parts[parts.length - 1])[0]).toUpperCase();
-}
-
-/**
- * The colored disc for a person. Used by the people list, the share sheet, and the
- * stack on a book cover — one element, sized by a custom property so the three callers
- * don't each need their own class.
+ * A person's color as a plain dot. Used by the people list, the share sheet, the reader
+ * picker, and the stack on a book cover — one element, sized by a custom property so the
+ * callers don't each need their own class.
  *
- * Always aria-hidden. It carries no information the surrounding text doesn't already:
- * next to a name it repeats it, and on a cover the card's own label lists the readers.
+ * No initials in it. A reader's color is already the thing that identifies them
+ * everywhere else in the app (their highlights, their marker on the spine), so the dot
+ * only has to be that color; letters inside it were a second, worse identifier competing
+ * with the first. They also can't be derived reliably — "Pumpkin (you)" reads as two
+ * words and came out as "P(".
+ *
+ * Always aria-hidden: it carries nothing the surrounding text doesn't already say.
  */
 function avatarEl(person, size) {
   const el = document.createElement('span');
   el.className = 'avatar';
   if (size) el.style.setProperty('--avatar-size', size + 'px');
   el.style.setProperty('--avatar-color', person.color ?? COLORS[0].hex);
-  el.textContent = initials(person.name);
   el.setAttribute('aria-hidden', 'true');
   return el;
 }
@@ -467,11 +471,13 @@ function bookCard(d, { onOpen, onDelete, members = [] } = {}) {
   if (otherReaders.length) {
     const stack = document.createElement('span');
     stack.className = 'stack';
-    for (const m of otherReaders.slice(0, 3)) stack.appendChild(avatarEl(m));
-    if (otherReaders.length > 3) {
-      // --muted, not --edge: the avatar sets its text to --ink, which clears 4.5:1 on
-      // --muted (8.3:1) and does not on --edge.
-      stack.appendChild(avatarEl({ name: `+${otherReaders.length - 3}`, color: 'var(--muted)' }));
+    for (const m of otherReaders.slice(0, 4)) stack.appendChild(avatarEl(m));
+    // The overflow count is text, so it can't be an avatar — those are plain dots now.
+    if (otherReaders.length > 4) {
+      const more = document.createElement('span');
+      more.className = 'stack-more';
+      more.textContent = `+${otherReaders.length - 4}`;
+      stack.appendChild(more);
     }
     cover.appendChild(stack);
   }
@@ -712,6 +718,9 @@ const sharedBooksCache = new Map();
 async function showPeople() {
   $('#start').hidden = true;
   $('#people').hidden = false;
+  // Books is how you leave, the same as from a book — so it has to be live here even
+  // though no book is open.
+  $('#t-home').disabled = false;
   await renderPeople();
   // Announce the screen, not the first row. Focus has to land somewhere, and a
   // heading says where you are.
@@ -721,15 +730,28 @@ async function showPeople() {
 function hidePeople() {
   $('#people').hidden = true;
   $('#start').hidden = false;
+  $('#t-home').disabled = !docId;
 }
 
+/**
+ * Guards against two renders overlapping. saveProfile writes a display_name to every one
+ * of your membership rows, and each write comes back down the realtime socket as its own
+ * change — so changing your name fired a burst of renderPeople() calls. Each one cleared
+ * the list, awaited the fetch, then appended, and two interleaved appends put every
+ * contact on screen twice. Only the newest render is allowed to touch the DOM, and it
+ * clears immediately before appending rather than before awaiting.
+ */
+let peopleRenderSeq = 0;
+
 async function renderPeople() {
+  const seq = ++peopleRenderSeq;
   const list = $('#people-list');
-  list.innerHTML = '';
 
   if (!isHosted()) {
     list.innerHTML =
-      '<div class="empty">Reading together needs a backend.<br>See DEPLOY.md.</div>';
+      '<div class="empty">This copy of Marginalia runs only in this browser.<br>' +
+      'Your books and notes never leave it, and there’s no one to connect to.<br>' +
+      'Connecting people needs the hosted setup — see the project README.</div>';
     return;
   }
 
@@ -737,9 +759,11 @@ async function renderPeople() {
   try {
     people = await store.listConnections();
   } catch (e) {
+    if (seq !== peopleRenderSeq) return;
     list.innerHTML = `<div class="empty">${escape(e.message)}</div>`;
     return;
   }
+  if (seq !== peopleRenderSeq) return;
 
   if (!people.length) {
     list.innerHTML =
@@ -747,16 +771,22 @@ async function renderPeople() {
     return;
   }
 
+  // Which rows were open, so a re-render triggered by something unrelated (a rename
+  // arriving over the socket) doesn't collapse a shelf you were looking at.
+  const wasOpen = new Set(
+    [...list.querySelectorAll('.person[data-open="true"]')].map((el) => el.dataset.userId)
+  );
+
   const frag = document.createDocumentFragment();
-  for (const p of people) {
-    frag.appendChild(personCard(p));
-  }
+  for (const p of people) frag.appendChild(personCard(p, wasOpen.has(p.userId)));
+  list.innerHTML = '';
   list.appendChild(frag);
 }
 
-function personCard(p) {
+function personCard(p, startOpen = false) {
   const wrap = document.createElement('div');
   wrap.className = 'person';
+  wrap.dataset.userId = p.userId;
 
   const booksId = `person-books-${p.userId}`;
   const books = document.createElement('div');
@@ -774,13 +804,21 @@ function personCard(p) {
     meta,
     controls: booksId,
     onToggle: (btn) => toggleSharedBooks(p, btn, books),
-    action: {
-      label: 'Disconnect',
-      onClick: () => disconnectPerson(p),
-    },
   });
 
-  wrap.append(row, books);
+  // The ✕ sits on the card, not in the row: as a labelled button parked at the end of a
+  // full-width row it read as the row's main action, which disconnecting is not. Same
+  // shape and same hover-reveal as .book-del on a cover.
+  const act = document.createElement('button');
+  act.type = 'button';
+  act.className = 'row-act';
+  act.textContent = '✕';
+  act.title = `Disconnect from ${p.name}`;
+  act.setAttribute('aria-label', `Disconnect from ${p.name}`);
+  act.onclick = () => disconnectPerson(p);
+
+  wrap.append(row, act, books);
+  if (startOpen) toggleSharedBooks(p, row.querySelector('.row-main'), books);
   return wrap;
 }
 
@@ -788,6 +826,8 @@ async function toggleSharedBooks(p, btn, container) {
   const open = btn.getAttribute('aria-expanded') === 'true';
   btn.setAttribute('aria-expanded', String(!open));
   container.hidden = open;
+  // Drives the card's border: closed, the row is the whole object and needs no divider.
+  container.closest('.person').dataset.open = String(!open);
   if (open || container.dataset.loaded === 'true') return;
 
   container.innerHTML = '<div class="empty">Loading…</div>';
@@ -1151,6 +1191,8 @@ function closeDoc() {
   $('#notes').innerHTML = '';
   delete app.dataset.format;
   delete app.dataset.open;
+  // People and the shelf share a z-index; leaving People up would stack the two.
+  $('#people').hidden = true;
   $('#start').hidden = false;
   renderShelf();
 }
@@ -1292,7 +1334,13 @@ function setTool(t) {
 }
 
 function bindTools() {
-  $('#t-home').onclick = closeDoc;
+  // One "back to the library" control for both places you can be away from it: reading a
+  // book, or looking at People. Two separate exits for the same destination was one more
+  // than the nav needed.
+  $('#t-home').onclick = () => {
+    if (!$('#people').hidden) return hidePeople();
+    closeDoc();
+  };
   $('#t-select').onclick = () => setTool('select');
   $('#t-ink').onclick = () => setTool('ink');
   $('#t-erase').onclick = () => setTool('erase');
@@ -1840,7 +1888,7 @@ function openReadersPopover(rows, x, y) {
   for (const p of rows) {
     const b = document.createElement('button');
     b.className = 'act';
-    b.appendChild(avatarEl({ name: nameOf(p.userId), color: colorOf(p.userId) }, 18));
+    b.appendChild(avatarEl({ color: colorOf(p.userId) }, 10));
     const name = document.createElement('span');
     name.textContent = nameOf(p.userId);
     const pos = document.createElement('span');
@@ -1901,10 +1949,23 @@ function bindNoteDialog() {
 // The person the revoke view is asking about, held between the two views.
 let revoking = null;
 
+/**
+ * Feedback for anything done from inside the share sheet. Not toast(): a <dialog>
+ * renders in the browser's top layer, which is above every z-index on the page, so a
+ * toast fired while the sheet is open comes up behind it and behind its backdrop blur.
+ */
+function shareMsg(text, kind) {
+  const el = $('#share-msg');
+  el.textContent = text ?? '';
+  if (kind) el.dataset.kind = kind;
+  else delete el.dataset.kind;
+}
+
 async function openShareDialog() {
   if (!docId) return;
   const dlg = $('#share-dlg');
   dlg.dataset.view = 'list';
+  shareMsg(null);
   $('#revoke-go').hidden = true;
   $('#share-invite').hidden = false;
   // Its enabled state depends on who owns the book, which renderShareList works out.
@@ -1933,12 +1994,12 @@ async function renderShareList() {
 
   // Adding a reader is owner-only, by link as much as by name — the invites policy and
   // share_document both enforce it, so the button has to say so rather than fail. Two
-  // different reasons, two different sentences: "no backend" and "not your book" are not
-  // the same rule and shouldn't wear the same tooltip.
+  // different reasons, two different sentences: "runs only in this browser" and "not
+  // your book" are not the same rule and shouldn't wear the same tooltip.
   const invite = $('#share-invite');
   invite.disabled = !isHosted() || !iAmOwner;
   invite.title = !isHosted()
-    ? 'Invite links need a backend. See DEPLOY.md.'
+    ? 'This copy of Marginalia runs only in this browser, so there’s nobody to invite.'
     : !iAmOwner
       ? `Only ${owner ? owner.name : 'the person who added this book'} can invite readers.`
       : 'Copy a link that lets one person in';
@@ -2026,22 +2087,22 @@ async function renderShareAdd(shares, iAmOwner) {
         } catch {
           /* the share worked; the extra detail is optional */
         }
-        toast(dupe
-          ? `Shared with ${p.name}. They already have this file — they'll be offered the merge.`
-          : `Shared with ${p.name}.`);
-
         await refreshMembers();
         await renderShareList();
+        // After renderShareList, which rebuilds the list but not this element.
+        shareMsg(dupe
+          ? `Shared with ${p.name}. They already have this file — they'll be offered the merge.`
+          : `Shared with ${p.name}.`);
       } catch (e) {
         check.checked = false;
         check.disabled = false;
-        toast(e.message);
+        shareMsg(e.message, 'error');
       }
     };
 
     const label = document.createElement('label');
     label.htmlFor = id;
-    label.appendChild(avatarEl(p, 24));
+    label.appendChild(avatarEl(p));
     const name = document.createElement('span');
     name.textContent = p.name;
     label.appendChild(name);
@@ -2092,10 +2153,14 @@ async function doRevoke() {
       $('#share-invite').hidden = false;
       await refreshMembers();
       await renderShareList();
-      toast(`${person.name} was removed.`);
+      shareMsg(leaveMarks
+        ? `${person.name} was removed. Their highlights stayed.`
+        : `${person.name} was removed, and their highlights are hidden.`);
     }
   } catch (e) {
-    toast(e.message);
+    // Leaving closes the dialog before this can fire; removing someone else doesn't.
+    if ($('#share-dlg').open) shareMsg(e.message, 'error');
+    else toast(e.message);
   } finally {
     revoking = null;
   }
@@ -2107,9 +2172,9 @@ async function restoreShare(person) {
     sharedBooksCache.delete(person.userId);
     await refreshMembers();
     await renderShareList();
-    toast(`${person.name} is back in.`);
+    shareMsg(`${person.name} is back in, with everything they'd written.`);
   } catch (e) {
-    toast(e.message);
+    shareMsg(e.message, 'error');
   }
 }
 
@@ -2127,7 +2192,6 @@ async function refreshMembers() {
 
 function bindPeople() {
   $('#t-people').onclick = showPeople;
-  $('#people-back').onclick = hidePeople;
   $('#people-invite').onclick = copyConnectInvite;
 
   // The people screen is a screen, not a dialog, so it has no built-in dismissal.
@@ -2162,6 +2226,7 @@ function bindShareDialog() {
   // so the next open doesn't land mid-question.
   $('#share-dlg').addEventListener('close', () => {
     $('#share-dlg').dataset.view = 'list';
+    shareMsg(null);
     revoking = null;
   });
 }

@@ -137,13 +137,18 @@ Get this right once and the client can be as naive as it likes.
 
 ## 4. Phases
 
+Status is marked on each heading: **✅ Done** means built and used in a real browser.
+**⚠️** means the code exists and is structurally checked but hasn't been exercised for
+real — for anything backend-shaped that means no query has hit a live Postgres.
+**⬜** means not started.
+
 Model annotations follow Anthropic's own guidance: Opus 4.8 for complex reasoning and
 long-horizon agentic coding, Sonnet 5 for frontier coding at scale, Haiku 4.5 for fast
 high-volume and sub-agent work. ([choosing a model](https://platform.claude.com/docs/en/about-claude/models/choosing-a-model))
 On Opus 4.8 the `effort` parameter defaults to `high`; `xhigh` is the recommended setting
 for coding and high-autonomy work, and is usually a better lever than switching models.
 
-### Phase 1 — Reader core
+### Phase 1 — Reader core  ✅ Done
 Render pdf.js into a virtualized scroller (±2 pages around the viewport), placeholder divs
 pre-sized from each page's viewport so the scrollbar is honest from frame one. Restore and
 persist `{page, y_frac}` on a trailing 800ms debounce.
@@ -154,7 +159,7 @@ persist `{page, y_frac}` on a trailing 800ms debounce.
 > math is load-bearing for every later phase, and a subtle sign error here surfaces as
 > "highlights drift when you zoom" three weeks later.
 
-### Phase 2 — Selection and highlights
+### Phase 2 — Selection and highlights  ✅ Done
 `Range.getClientRects()` → merge into line rects → normalize → store → render as
 `mix-blend-mode: multiply` divs. Selection popover with the six-color palette.
 
@@ -163,7 +168,7 @@ persist `{page, y_frac}` on a trailing 800ms debounce.
 > text spans, RTL runs.
 > **Sonnet 5** for the popover, palette, and hit-testing UI.
 
-### Phase 3 — Stylus ink
+### Phase 3 — Stylus ink  ✅ Done
 Pointer capture with `getCoalescedEvents()` for sub-frame sampling, `pressure` mapped to
 width, Catmull-Rom smoothing on render, RDP simplification on commit. Pen beats touch;
 touch scrolls unless ink mode is on; `touch-action` toggles per mode.
@@ -173,14 +178,14 @@ touch scrolls unless ink mode is on; `touch-action` toggles per mode.
 > naive implementations produce jagged lines and phantom dots. Give it the file, the
 > device matrix, and room to reason.
 
-### Phase 4 — Backend
+### Phase 4 — Backend  ⚠️ Written, never run against a live project
 Schema, RLS policies, storage bucket, magic-link auth, invite flow.
 
 > **Opus 4.8 (`xhigh`)** for the RLS policies. Security-sensitive, and an over-permissive
 > `using` clause fails silently — it just works, for everyone, forever.
 > **Haiku 4.5** for the migration scaffolding, seed fixtures, and type generation.
 
-### Phase 5 — Sync
+### Phase 5 — Sync  ✅ Done locally · ⚠️ hosted path unverified
 Adapter behind an interface (already in the prototype). Optimistic local write → IndexedDB
 outbox → flush → Realtime subscription for the other person's changes. Last-write-wins per
 annotation id; conflicts are near-impossible because rows are per-user and immutable except
@@ -190,14 +195,14 @@ by their author.
 > carefully about state machines" work Opus is for. Explicitly instruct it *not* to
 > reach for a CRDT — capable models will happily build one, and you don't need it.
 
-### Phase 6 — The spine, presence, notes panel
+### Phase 6 — The spine, presence, notes panel  ✅ Done
 Left rail showing the whole book with both readers' markers and annotation ticks. Note
 panel. Empty states. Copy.
 
 > **Sonnet 5.** Strong visual and interaction work, fast iteration loop. This phase is
 > mostly taste and repetition, and you'll run it many times.
 
-### Phase 7 — Hardening
+### Phase 7 — Hardening  ⬜ Not started
 Unit tests for geometry and anchors, a device matrix pass (iPad+Pencil, Surface+Pen,
 laptop trackpad), a 900-page performance pass, accessibility.
 
@@ -205,7 +210,7 @@ laptop trackpad), a 900-page performance pass, accessibility.
 > the docs call out sub-agent tasks and high-volume processing as its lane.
 > **Opus 4.8** for the perf investigation, where the answer isn't known in advance.
 
-### Phase 8 — Anything long-horizon
+### Phase 8 — Anything long-horizon  ⬜ As needed
 Large refactors, a Vite/TypeScript migration, cross-cutting changes.
 
 > **Opus 4.8 (`xhigh`)**, or **Fable 5** if you want the most capable widely released
@@ -241,7 +246,7 @@ highlights, typed notes, stylus ink with pressure, per-user color, and the spine
 
 ---
 
-## 9. The social layer: from a pair to a group
+## 9. The social layer: from a pair to a group  ⚠️ Built, SQL never run
 
 The original design fixed the reader count at two and used that fact directly for
 security (a book capped at two readers means a leaked invite link stops mattering the

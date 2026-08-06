@@ -74,7 +74,7 @@ exactly like a broken sign-in. If you're on a deployed URL and want the multi-ta
 ### Hosted (default on any deployed URL)
 The same code talks to Postgres — sign-in, real sync across devices, invite links,
 sharing a book with more than one other person. Fill in `src/config.js` and see
-`DEPLOY.md`. Live version at
+"Deploying" below. Live version at
 [tboggia.github.io/marginalia](https://tboggia.github.io/marginalia/).
 
 To exercise it from your laptop before pushing, open
@@ -151,8 +151,8 @@ math (the part that draws the gap between more than two readers) is checked agai
 old two-person code across 200,000 randomized cases and is exactly equivalent at N=2. But
 no query in either file has hit a real database, and nobody has watched three real
 accounts share a book at once. Assume an afternoon of small breakage on first run — check
-the RLS by hand and run through the checklist in `DEPLOY.md` before trusting it with a
-real book.
+the RLS by hand and run through the checks under "Deploying" below before trusting it
+with a real book.
 
 **Known gaps:** scanned PDFs with no text layer can be inked but not highlighted — see
 "Books with no text layer" below for what the reader does about it. Highlights stop at the page edge (PDF) or
@@ -195,7 +195,7 @@ which is how a page ends up looking texty to a counter and selecting like a phot
 Hosted mode is Postgres tables, RLS, one storage bucket, and a set of security-definer
 functions — `schema.sql` for the reader itself, `social.sql` for connections, sharing,
 and merging duplicates. This section is the "why"; those two files are the "what," and
-`DEPLOY.md` is the "how do I stand one up." Run `schema.sql` first, then `social.sql`.
+"Deploying" below is the "how do I stand one up." Run `schema.sql` first, then `social.sql`.
 
 ### Data model
 
@@ -308,7 +308,7 @@ so the first path segment already carries the identity the policy needs.
 Reads go through **signed URLs**, not downloaded bytes: `getDocumentSource` calls
 `createSignedUrl` and hands pdf.js a URL rather than an ArrayBuffer, so pdf.js can issue HTTP
 range requests and stream a 900-page book instead of pulling the whole file before the first
-render. (EPUB does the opposite on purpose — see the `DEPLOY.md` troubleshooting table for why
+render. (EPUB does the opposite on purpose — see the "What you'll hit" table below for why
 `epub-reader.js` downloads the bytes itself instead of handing epub.js the signed URL directly.)
 
 ### Realtime only respects RLS if you ask it to
@@ -360,7 +360,7 @@ Sign-in is `supabase.auth.signInWithOtp` with `emailRedirectTo` set to the exact
 standing on, including any `?join=...` query string, so an invite survives the round trip through
 email. That URL **must** be listed under Authentication → URL Configuration → Redirect URLs in
 the Supabase dashboard, or Supabase silently bounces the magic link to the Site URL root instead
-of erroring. See `DEPLOY.md` for the exact steps — this is the single most common thing to get
+of erroring. See "Deploying" below for the exact steps — this is the single most common thing to get
 wrong when standing up a new deployment, and it fails without an error message pointing at it.
 
 ### Client: one adapter interface, two implementations
@@ -383,11 +383,188 @@ Two decisions inside `supabase-adapter.js` worth knowing before touching it:
   reach a browser. Supabase shows both keys on the same settings page, one above the other, which
   is the usual way they end up in the wrong place.
 
+## Deploying
+
+About 30 minutes, most of it waiting on Supabase. The free tier covers a small reading
+group by roughly four orders of magnitude.
+
+The order matters: **do the backend first.** Static hosting takes five minutes and is
+the easy half, but a URL with no backend gives everyone their own separate private
+library that shares nothing. It'll look like it works. It won't.
+
+### 1. Supabase (the half that matters)
+
+1. Create a project at [supabase.com](https://supabase.com). Save the database
+   password somewhere; you won't need it for this, but you'll want it eventually.
+2. **SQL Editor** → paste all of `schema.sql` → Run. It should report success with no
+   rows. This creates the reader's own tables, RLS policies, and storage policies.
+3. **SQL Editor** → paste all of `social.sql` → Run, after `schema.sql` has already run.
+   This adds `profiles`, `connections`, `invites`, the sharing and revocation functions,
+   and the realtime fix described above. Bringing an existing pre-social database
+   forward: run `migration.sql` first if you haven't already (it predates invites
+   entirely), then `social.sql` — it detects which case you're in and adjusts what it
+   migrates accordingly.
+4. **Storage** → New bucket → name it `books` → **leave "Public bucket" OFF.** If you
+   turn it on, anyone who guesses a filename downloads your books, and the storage
+   policies in `schema.sql` become decoration.
+5. **Authentication → URL Configuration** → set **Site URL** to your deployed URL, and
+   add it to **Redirect URLs** too. Magic links bounce to the site root if the URL
+   they were issued for isn't listed. This is the single most common thing to get
+   wrong, and it fails quietly.
+6. **Project Settings → API** → copy the **Project URL** and the **anon / publishable**
+   key into `src/config.js`.
+
+> **The `anon` key is public and belongs in your git history.** It identifies the
+> project; it authorizes nothing. Permissions are decided by RLS, server-side, on
+> every query.
+>
+> **The `service_role` key bypasses RLS completely and must never touch a browser.**
+> Supabase shows both keys on the same page, one under the other. That is how they
+> end up in the wrong place.
+
+#### Check the policies before you trust them
+
+Worth ten minutes, because an over-permissive `using` clause doesn't error — it just
+works, for everyone, forever. In the SQL editor:
+
+```sql
+-- Should return zero rows. If it returns your annotations, RLS is off somewhere.
+set role anon;
+select * from annotations;
+select * from profiles;
+select * from connections;
+reset role;
+```
+
+Then sign in as a third account in a private window and confirm you can't see the book
+until you're actually shared into it — and that you can't see someone's profile or
+connections unless you're connected to them or share a book with them.
+
+Two Postgres-side checks worth running once, since a missing one fails silently rather
+than with an error:
+
+```sql
+-- Should return 't' for all four. A 'f' means the realtime socket is broadcasting that
+-- table's changes to every subscriber regardless of RLS.
+select relname, relreplident = 'f' as full_identity
+from pg_class where relname in ('annotations','progress','memberships','connections');
+```
+
+```sql
+-- All four should show prosecdef = true (security definer). If any come back false,
+-- RLS applies to the function's own queries and it will 403 on the exact gap it
+-- exists to cross.
+select proname, prosecdef from pg_proc
+where proname in ('redeem_invite','share_document','revoke_share','merge_documents');
+```
+
+### 2. Static hosting
+
+Any static host. The app is plain files — no build, no server, no Node.
+
+**Cloudflare Pages / Netlify:** drag this folder onto their deploy page. Done. Set a
+custom domain if you want a URL you can remember.
+
+**GitHub Pages:** see below — it has a couple of specifics worth knowing.
+
+**Your own box:** `python3 -m http.server` behind Caddy or nginx. It must be **HTTPS** —
+`navigator.clipboard` (the invite button) and service workers both require a secure
+context. `localhost` is exempt; your VPS's bare IP is not.
+
+Nothing here needs a build step, but if you later add one, that's the moment to move
+`config.js` to an env var. Not before — you'd be protecting a public key.
+
+### 3. GitHub Pages specifically
+
+It's a good fit: Pages serves static files, and this app is static files. No build step,
+no Actions workflow needed. Push and set Settings → Pages → deploy from branch → `main`
+→ `/ (root)`. Your URL is `https://<you>.github.io/<repo>/`.
+
+Two files in this folder exist for Pages:
+
+- **`.nojekyll`** — empty, and must stay empty. It's a flag. Pages runs everything
+  through Jekyll by default, which silently drops files and folders beginning with `_`.
+  Nothing here starts with `_` today; this stops that from becoming a mystery later.
+- **`.gitignore`** — excludes `*.pdf` and `*.epub`. Read the comment in it before you
+  override that.
+
+**The subpath is already handled.** Project sites live at `/<repo>/`, not `/`. That
+prefix is what usually breaks a static app. This one is fine: every path in `index.html`
+and every import is relative, and the invite link is built from
+`location.origin + location.pathname`, so it comes out as
+`https://you.github.io/marginalia/?join=...` rather than dropping the repo name.
+Verified under a simulated subpath. Don't "fix" either of those into an absolute `/`.
+If you use the `<you>.github.io` repo instead of a project repo, you're at the root and
+none of this applies.
+
+**Free plan means a public repo.** Pages is free for public repositories; private repos
+need Pro or above. Note that **the published site is public either way** — even on Pro,
+`config.js` is downloadable by anyone who visits. That's fine. It holds the anon key,
+which is public by design, and RLS is what actually stops strangers reading your margin.
+What a public repo *does* change:
+
+- **Never commit the book.** `.gitignore` covers PDF and EPUB. A public repo makes a
+  committed book a copyrighted work published to the internet under your name, and git
+  history keeps it after you delete the file. Books go in the Supabase bucket.
+- **Never commit `service_role`.** Same reason, much worse. It bypasses RLS. If it ever
+  lands in a public repo, rotate it in Supabase immediately — scrubbing the history is
+  not enough, because public repos are scraped for keys within minutes.
+
+**Set the Supabase URLs to the full path.** In Authentication → URL Configuration, Site
+URL and Redirect URLs must include the repo path and the trailing slash:
+
+```
+https://<you>.github.io/<repo>/
+```
+
+Not `https://<you>.github.io`. A magic link issued for a URL that isn't listed bounces to
+the root and 404s, with no error explaining why. This is the single most likely thing to
+cost you an evening. HTTPS is on by default on `github.io`, so the clipboard-based invite
+button works.
+
+**Limits.** A recommended 1 GB repo limit, a 1 GB published-site limit, and a soft
+100 GB/month bandwidth limit. Irrelevant for a small reading group and a few hundred KB
+of JS — as long as the books stay out of the repo. If you commit a 40 MB scan and
+everyone re-reads it, you're suddenly using Pages as a CDN for a book, which is both
+against the point and against the terms.
+
+### What you'll hit
+
+| Symptom | Cause |
+|---|---|
+| Magic link lands on the site root, not the book | The URL isn't in **Redirect URLs**. Add it including the path. |
+| Sign-in works, book list is empty | Uploaded before the membership row was written. Check `memberships`. |
+| Book 404s or hangs on load | Bucket isn't named `books`, or the storage policies didn't run. |
+| EPUB downloads but never renders | The fetch of the signed URL failed — check the console for a CORS or 4xx error. The app deliberately downloads the bytes itself and hands epub.js an ArrayBuffer: given a URL ending in `.epub?token=...`, epub.js misreads the query string and treats the book as an unpacked directory, requesting `META-INF/container.xml` from the wrong path. Don't "simplify" it back to passing the URL. |
+| Highlights save but nobody else sees them | Realtime isn't publishing. Re-run the `alter publication` lines. |
+| Realtime works but leaks | `replica identity full` didn't run. Without it the socket ignores RLS. |
+| Invite button does nothing | Not HTTPS. Clipboard needs a secure context; it falls back to a prompt. |
+| Invite button is greyed out, with a tooltip | You're not the owner of the open book. Only the person who added it can share it — ask them, or use the share sheet's "Add someone you're connected to" if you're already connected. |
+| "That invite link has already been used" on a link nobody clicked | It's expired (two weeks by default) or was revoked. Mint a new one from the share sheet. |
+| Someone you removed gets back in on their old link | Shouldn't happen — `redeem_invite` checks for a revoked membership before honoring a link. If it does, `social.sql` didn't fully apply; re-run it. |
+| The merge banner never appears for an obvious duplicate | `find_my_duplicates` only matches on exact `sha256`. Two different scans of the same title, or a re-exported PDF, are different bytes and are never offered a merge — intentional, not a bug. |
+
+### Before you put a real book in it
+
+- **Rate-limit `redeem_invite`.** It's the one function reachable by any signed-in
+  user with nothing but a guessed string, and it's a guessing oracle. 64 bits is a
+  lot to guess, but Supabase's built-in rate limits are worth turning on.
+- **Public sign-ups have to stay on.** This is a real change from the two-person
+  design, which used to recommend disabling them once both people had registered —
+  that advice now directly breaks the product: every new person you invite, connect
+  or share a book with needs to be able to create an account first. RLS is what
+  actually keeps a stranger with an account from seeing your books, not a closed
+  signup form — an account with no membership row sees nothing, same as before.
+  If you want to restrict *who* can sign up at all (not just who can see your
+  books), Supabase supports allow-listing by email domain under Authentication →
+  Providers → email, which doesn't have this problem.
+- **Storage has no quota per user.** Fine for a household or a small reading group;
+  worth watching once a book is genuinely shared with more than a couple of people.
+
 ## Layout
 
 ```
 PLAN.md                 the technical plan, with model notes per phase
-DEPLOY.md               how to get it onto a URL (incl. GitHub Pages)
 .gitignore              keeps books out of a public repo — read the comment
 .nojekyll               stops GitHub Pages running Jekyll over this. Keep it empty.
 schema.sql              Postgres tables + RLS. The RLS is the security model.

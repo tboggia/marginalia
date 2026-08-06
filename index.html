@@ -153,10 +153,16 @@
 
   /* The exception to the rule above: hidden beats disabled when there is no book at
      all. Greying out Draw says "not for this book"; over the shelf there is no book
-     for it to be about, so the tools and zoom leave with it (see openDoc/closeDoc). */
-  #app:not([data-open]) :is(#sep-tools, #t-select, #t-ink, #t-erase, #zoom-out, #zoom-in, #zoom) {
+     for it to be about, so the tools and zoom leave with it (see openDoc/closeDoc).
+
+     "Find them" goes the same way, for the same reason — it jumps to another reader's
+     place in the book you're reading, which is meaningless with no book open. People
+     takes its slot there instead, and stands down once you're reading. */
+  #app:not([data-open]) :is(#sep-tools, #t-select, #t-ink, #t-erase,
+                            #zoom-out, #zoom-in, #zoom, #t-jump, #t-panel) {
     display: none;
   }
+  #app[data-open] #t-people { display: none; }
 
   /* Which #t-panel glyph shows tracks whether the margin is open — the arrow icon
      signals "clicking tucks the panel away". */
@@ -509,6 +515,25 @@
      can't show it. */
   .btn:disabled { opacity: .55; cursor: not-allowed; }
   .btn:disabled:hover { background: var(--panel); }
+
+  /* Every "copy an invite link" button in the app, so the one on the people screen and
+     the one in the share sheet are recognizably the same control. The chain icon is
+     what says "link" before the label is read.
+
+     Confirmation is on the button, not in a toast: a <dialog> renders in the browser's
+     top layer, which sits above every z-index on the page — so the toast the share
+     sheet used to fire came up *behind* its own modal. */
+  .btn-copy { display: inline-flex; align-items: center; gap: 7px; }
+  .btn-copy svg {
+    width: 14px; height: 14px; flex: none;
+    fill: none; stroke: currentColor; stroke-width: 1.7;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .btn-copy .ico-ok, .btn-copy[data-copied="true"] .ico-link { display: none; }
+  .btn-copy[data-copied="true"] .ico-ok { display: block; }
+  /* --ink on --c-cyan is 8.5:1. Color isn't the only signal — the label changes too. */
+  .btn-copy[data-copied="true"],
+  .btn-copy[data-copied="true"]:hover { background: var(--c-cyan); color: var(--ink); }
   .btn.primary { background: var(--text); color: var(--ink); font-weight: 600; }
   .btn.primary:hover { background: #fff; }
   .btn.danger:hover { background: #4A1F1F; color: #F0A0A0; }
@@ -561,6 +586,21 @@
   }
   .row + .row, .person + .person { margin-top: 8px; }
   .row:hover { background: var(--raised); }
+
+  /* The person and the books they share with you are one object, so they get one
+     container. Open, the shelf was floating loose below the row with nothing tying the
+     two together — the border is what says "these belong to that". */
+  .person {
+    position: relative;
+    border: 1px solid var(--rule); border-radius: 10px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+  /* The row already has the container's background; a second one just rounds a
+     rectangle inside a rectangle. */
+  .person > .row { background: none; border-radius: 0; padding-right: 40px; }
+  .person > .row:hover { background: var(--raised); }
+  .person[data-open="true"] > .row { border-bottom: 1px solid var(--rule); }
   /* A revoked reader is still named next to their old highlights, so they stay
      legible — dimmed, with the state also written out in .row-meta. Opacity is
      never the only signal. */
@@ -578,8 +618,10 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .row-meta { display: block; margin-top: 2px; font-size: 11.5px; line-height: 1.35; color: var(--faint); }
-  /* Sits at the end of a .row. Hover/focus revealed like .book-del: removing someone
-     shouldn't be the most prominent thing on a list you read to see who's here. */
+  /* Sits at the end of a .row in the share sheet, where the row is a flex item and the
+     verb needs saying ("Remove", "Add back"). Hover/focus revealed like .book-del:
+     removing someone shouldn't be the most prominent thing on a list you read to see
+     who's here. */
   .row-act {
     flex: none; height: 26px; padding: 0 9px; border-radius: 6px;
     font-size: 11.5px; color: var(--muted); background: var(--raised);
@@ -588,17 +630,28 @@
   .row:hover .row-act, .row:focus-within .row-act, .row-act:focus-visible { opacity: 1; }
   .row-act:hover { background: #4A1F1F; color: #F0A0A0; }
 
-  /* The colored disc that stands for a person wherever there isn't room for a
-     name: people rows, the share sheet, the stack on a book cover. --ink on the
-     fill is the same guarantee the reader colors already make as filled markers
-     (7:1 or better — see the token block). */
+  /* On the people screen the same action becomes an ✕ in the corner of the card, the
+     way .book-del sits on a cover — a full-width row with a labelled button parked at
+     the end reads as the row's primary action, which disconnecting is not. It's
+     positioned against .person so it clears the disclosure chevron. */
+  .person > .row-act {
+    position: absolute; top: 8px; right: 8px;
+    width: 24px; height: 24px; padding: 0;
+    display: grid; place-items: center;
+    font-size: 13px; line-height: 1;
+    background: var(--raised); color: var(--muted);
+  }
+  .person:hover > .row-act, .person:focus-within > .row-act { opacity: 1; }
+
+  /* A person's color as a plain dot — people rows, the share sheet, the reader
+     picker, the stack on a book cover. No letters in it: the color is already how
+     a reader is identified everywhere else (their highlights, their spine marker),
+     and initials were a second identifier competing with the first. */
   .avatar {
-    flex: none; display: grid; place-items: center;
-    width: var(--avatar-size, 32px); height: var(--avatar-size, 32px);
+    flex: none;
+    width: var(--avatar-size, 14px); height: var(--avatar-size, 14px);
     border-radius: 50%;
-    font: 600 calc(var(--avatar-size, 32px) * .4)/1 var(--ui);
-    letter-spacing: .02em;
-    color: var(--ink); background: var(--avatar-color, var(--c-amber));
+    background: var(--avatar-color, var(--c-amber));
   }
 
   /* ------------------------------------------------------------- duplicates
@@ -617,7 +670,8 @@
 
   .person-books {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
-    gap: 14px 12px; padding: 12px 12px 4px;
+    gap: 14px 12px; padding: 14px 12px 16px;
+    background: rgba(0,0,0,.18);
   }
   .person-books .book-title { font-size: 11.5px; }
   /* The chevron turns to point down when the row is open. It's decorative: the
@@ -632,12 +686,14 @@
 
   /* The readers on a book cover, overlapped like a hand of cards. Bottom-left,
      because .fmt already owns bottom-right. */
-  .stack { position: absolute; left: 6px; bottom: 6px; display: flex; }
-  .stack .avatar {
-    --avatar-size: 20px;
-    box-shadow: 0 0 0 2px rgba(9,12,16,.78);
+  .stack {
+    position: absolute; left: 6px; bottom: 6px;
+    display: flex; align-items: center; gap: 3px;
+    padding: 3px 5px; border-radius: 8px;
+    background: rgba(9,12,16,.72);
   }
-  .stack .avatar + .avatar { margin-left: -7px; }
+  .stack .avatar { --avatar-size: 7px; }
+  .stack-more { font: 600 8.5px/1 var(--mono); color: var(--muted); }
 
   /* --------------------------------------------------------- share dialog */
   /* One dialog, two views. Revoking needs a question answered, not an OK — and
@@ -647,6 +703,10 @@
   #share-dlg[data-view="list"] [data-view="list"] { display: block; }
   #share-dlg[data-view="revoke"] [data-view="revoke"] { display: block; }
   #share-list { max-height: 40vh; overflow-y: auto; margin: 0 0 4px; }
+  /* Same idiom as #auth-msg: never color alone, the wording says which it is. */
+  #share-msg { margin: 12px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--c-cyan); }
+  #share-msg:empty { display: none; }
+  #share-msg[data-kind="error"] { color: #F2A08C; }
   .share-add { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 8px; }
   .share-add:hover { background: var(--raised); }
   .share-add input[type="checkbox"] { flex: none; width: 15px; height: 15px; accent-color: var(--c-cyan); }
@@ -896,9 +956,15 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s7-5.6 7-11a7 7 0 10-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>
       <span id="jump-label">Find them</span>
     </button>
-    <button class="tool" id="t-invite" title="Copy a link that lets one other person in" hidden>
+    <button class="tool" id="t-invite" title="See and change who's reading this book" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7L12 19"/></svg>
-      Invite
+      Readers
+    </button>
+    <!-- Takes the slot "Find them" occupies while a book is open. Both are about other
+         people; which one is useful depends entirely on whether you're reading. -->
+    <button class="tool" id="t-people" title="The people you read with">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19a5.5 5.5 0 0111 0"/><path d="M16 5.2a3.2 3.2 0 010 5.6"/><path d="M17.5 13.6a5.5 5.5 0 013 4.9"/></svg>
+      People
     </button>
     <button class="tool" id="t-who" title="Change your name and color">You</button>
     <button class="tool" id="t-panel" aria-pressed="true" aria-controls="panel"
@@ -961,7 +1027,6 @@
     <div class="screen-head">
       <h1 id="shelf-head">Your books</h1>
       <div class="spacer"></div>
-      <button class="btn" id="t-people">People</button>
       <button class="btn primary" id="pick">Add a book</button>
     </div>
 
@@ -995,8 +1060,13 @@
            on the first person tells it nothing. -->
       <h1 id="people-head" tabindex="-1">People</h1>
       <div class="spacer"></div>
-      <button class="btn" id="people-back">Your books</button>
-      <button class="btn primary" id="people-invite">Invite someone</button>
+      <!-- "Books" in the topbar is the way back, the same as it is from a book. A second
+           back button here was a second answer to a question the nav already answers. -->
+      <button class="btn primary btn-copy" id="people-invite" type="button">
+        <svg class="ico-link" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7L12 19"/></svg>
+        <svg class="ico-ok" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12.5l5 5 11-11"/></svg>
+        <span class="lbl">Copy invite link</span>
+      </button>
     </div>
     <section id="people-list" aria-labelledby="people-head"></section>
   </div>
@@ -1064,8 +1134,16 @@
     </fieldset>
   </div>
 
+  <!-- Feedback for anything done from inside this dialog. A toast would render behind
+       it: <dialog> lives in the browser's top layer, above every z-index on the page. -->
+  <p id="share-msg" role="status" aria-live="polite"></p>
+
   <div class="dlg-row">
-    <button class="btn" id="share-invite" value="invite" type="button">Copy invite link</button>
+    <button class="btn btn-copy" id="share-invite" value="invite" type="button">
+      <svg class="ico-link" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7L12 19"/></svg>
+      <svg class="ico-ok" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12.5l5 5 11-11"/></svg>
+      <span class="lbl">Copy invite link</span>
+    </button>
     <div class="spacer"></div>
     <button class="btn" value="cancel">Done</button>
     <button class="btn danger" id="revoke-go" value="revoke" type="button" hidden>Remove</button>

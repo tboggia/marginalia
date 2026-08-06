@@ -255,7 +255,13 @@ export class LocalStore {
      rather than failing silently. app.js guards these with isHosted() before calling,
      so the throws are a backstop, not the normal path. */
 
-  static NEEDS_BACKEND = 'Sharing needs a backend. See DEPLOY.md.';
+  // Said to a person, not to the developer. This used to name a file in the repo, which
+  // told whoever hit it to go read something they may not have, about a thing they didn't
+  // know they'd opted out of. What they actually need to know is that this copy has no
+  // accounts and no server, so there is nobody on the other end — not that a step was
+  // skipped.
+  static NEEDS_BACKEND =
+    'This copy of Marginalia runs only in this browser, so there’s nobody to share with.';
 
   async getProfile() {
     return {
