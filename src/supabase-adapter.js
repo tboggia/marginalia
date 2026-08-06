@@ -136,7 +136,13 @@ export class SupabaseStore {
       .select().single();
     if (error) throw error;
 
-    await this.saveMember(data.id, { userId: this.user.id, name: 'You', color: '#E9A13B' });
+    // Seed the creator's membership from their profile rather than the old hardcoded
+    // "You" / amber. Everyone reads this row, and "You" is only the right word to one
+    // person — it used to be what the other reader saw on your highlights.
+    const profile = await this.getProfile();
+    await this.saveMember(data.id, {
+      userId: this.user.id, name: profile.name, color: profile.color,
+    });
     return {
       docId: data.id, title: data.title, author: data.author ?? null,
       format: data.format, storagePath: path,
@@ -193,20 +199,177 @@ export class SupabaseStore {
     const { data: gone, error } = await this.sb
       .from('documents').delete().eq('id', docId).select('id');
     if (error) throw error;
-    if (!gone?.length) throw new Error('That book didn’t delete — the database refused it.');
+    // Deleting is owner-only now (social.sql), where it used to be any member. A
+    // non-owner's delete is filtered to zero rows rather than erroring, so without this
+    // check it looks like it worked until the shelf re-renders.
+    if (!gone?.length) {
+      throw new Error('Only the person who added this book can delete it. You can leave it instead.');
+    }
   }
 
-  async getInviteCode(docId) {
-    const { data } = await this.sb
-      .from('documents').select('invite_code').eq('id', docId).single();
-    return data?.invite_code ?? null;
-  }
-
-  /** Cross the read barrier: you can't see a document until you're a member of it. */
-  async joinByCode(code, name) {
-    const { data, error } = await this.sb.rpc('join_document', { code, name });
+  /**
+   * A book you don't own is left, not deleted — the owner's copy and everyone else's
+   * marks survive. Revoking your own membership is the same call the share sheet makes
+   * on someone else, which is why it goes through revoke_share rather than a plain
+   * delete on the memberships row.
+   */
+  async leaveDocument(docId, { leaveMarks = true } = {}) {
+    const { error } = await this.sb.rpc('revoke_share', {
+      doc: docId, target: this.user.id, leave_marks: leaveMarks,
+    });
     if (error) throw new Error(error.message);
-    return data; // document id
+  }
+
+  /* ------------------------------------------------------------------ social */
+
+  async getProfile() {
+    const { data, error } = await this.sb
+      .from('profiles').select('*').eq('user_id', this.user.id).maybeSingle();
+    if (error) throw error;
+    if (!data) return { userId: this.user.id, name: 'Reader', color: '#E9A13B' };
+    return { userId: data.user_id, name: data.display_name, color: data.color };
+  }
+
+  /**
+   * The profile is the preference. `memberships.color` stays authoritative inside a
+   * book, because two readers of one book must not share a color and that can only be
+   * settled per book — so the name propagates everywhere and the color does not.
+   */
+  async saveProfile({ name, color }) {
+    const { error } = await this.sb.from('profiles').upsert({
+      user_id: this.user.id,
+      display_name: name,
+      color,
+      updated_at: new Date().toISOString(),
+    });
+    if (error) throw error;
+    await this.sb
+      .from('memberships').update({ display_name: name }).eq('user_id', this.user.id);
+  }
+
+  async listConnections() {
+    const { data, error } = await this.sb.rpc('list_connections');
+    if (error) throw new Error(error.message);
+    return (data ?? []).map((c) => ({
+      userId: c.user_id, name: c.name, color: c.color,
+      status: c.status, bookCount: Number(c.book_count ?? 0),
+    }));
+  }
+
+  async disconnect(userId) {
+    // The pair is stored once, ordered, so either column can hold them.
+    const { error } = await this.sb
+      .from('connections').delete()
+      .or(`user_a.eq.${userId},user_b.eq.${userId}`);
+    if (error) throw error;
+  }
+
+  /** The books the two of you are both currently in. Grants, not connections. */
+  async listSharedBooks(userId) {
+    const { data, error } = await this.sb
+      .from('memberships')
+      .select('document_id, documents(id,title,author,cover,format,created_at)')
+      .eq('user_id', userId).is('revoked_at', null);
+    if (error) throw error;
+    const mine = new Set((await this.listDocuments()).map((d) => d.id));
+    return (data ?? [])
+      .map((r) => r.documents)
+      .filter((d) => d && mine.has(d.id))
+      .map((d) => ({
+        id: d.id, title: d.title, author: d.author ?? null, cover: d.cover ?? null,
+        format: d.format, createdAt: Date.parse(d.created_at),
+      }));
+  }
+
+  async createInvite({ kind, docId = null, maxUses = 1, expiresInDays = 14 } = {}) {
+    const { data, error } = await this.sb
+      .from('invites')
+      .insert({
+        kind,
+        document_id: docId,
+        max_uses: maxUses,
+        expires_at: expiresInDays
+          ? new Date(Date.now() + expiresInDays * 864e5).toISOString()
+          : null,
+      })
+      .select('code').single();
+    if (error) throw error;
+    return { code: data.code };
+  }
+
+  /**
+   * Cross the read barrier: you can't see a document, or an invite, until the function
+   * lets you. Returns {kind, docId} — a book invite lands you in the book, a connect
+   * invite only links the two accounts.
+   */
+  async redeemInvite(code, name) {
+    const { data, error } = await this.sb.rpc('redeem_invite', { code, name });
+    if (error) throw new Error(error.message);
+    const row = Array.isArray(data) ? data[0] : data;
+    return { kind: row?.invite_kind ?? null, docId: row?.doc_id ?? null };
+  }
+
+  async revokeInvite(code) {
+    const { error } = await this.sb.rpc('revoke_invite', { invite_code: code });
+    if (error) throw new Error(error.message);
+  }
+
+  async listShares(docId) {
+    const { data, error } = await this.sb.rpc('list_shares', { doc: docId });
+    if (error) throw new Error(error.message);
+    return (data ?? []).map((s) => ({
+      userId: s.user_id, name: s.name, color: s.color,
+      revokedAt: s.revoked_at ? Date.parse(s.revoked_at) : null,
+      leftMarks: s.left_marks, isOwner: s.is_owner,
+    }));
+  }
+
+  async shareDocument(docId, userId) {
+    const { error } = await this.sb.rpc('share_document', { doc: docId, target: userId });
+    if (error) throw new Error(error.message);
+  }
+
+  async revokeShare(docId, userId, { leaveMarks = true } = {}) {
+    const { error } = await this.sb.rpc('revoke_share', {
+      doc: docId, target: userId, leave_marks: leaveMarks,
+    });
+    if (error) throw new Error(error.message);
+  }
+
+  /** Null unless they hold a byte-identical file. See mergeDocuments. */
+  async findDuplicate(docId, userId) {
+    const { data, error } = await this.sb.rpc('find_duplicate', { doc: docId, target: userId });
+    if (error) throw new Error(error.message);
+    return data ? { docId: data } : null;
+  }
+
+  /**
+   * Books sitting in your library twice — yours, and someone else's copy of the same
+   * file that was shared with you. Only pairs you can act on come back: `mine` is always
+   * a copy you created, because that is the only kind you are allowed to give up.
+   */
+  async listDuplicates() {
+    const { data, error } = await this.sb.rpc('find_my_duplicates');
+    if (error) throw new Error(error.message);
+    return (data ?? []).map((d) => ({
+      mineId: d.mine, mineTitle: d.mine_title,
+      theirsId: d.theirs, theirsTitle: d.theirs_title,
+      ownerName: d.owner_name,
+    }));
+  }
+
+  /**
+   * Only ever safe between identical files, which the RPC re-checks by hash before it
+   * touches a row. It returns the dropped copy's storage path rather than deleting the
+   * object itself: removing the storage.objects row in SQL would drop the record and
+   * leave the file orphaned in the bucket.
+   */
+  async mergeDocuments(keepId, dropId) {
+    const { data: path, error } = await this.sb.rpc('merge_documents', {
+      keep: keepId, drop_id: dropId,
+    });
+    if (error) throw new Error(error.message);
+    if (path) await this.sb.storage.from('books').remove([path]);
   }
 
   async listAnnotations(docId) {
@@ -268,10 +431,17 @@ export class SupabaseStore {
     });
   }
 
+  /**
+   * Revoked members come back too, carrying `revokedAt`. They have to: a reader who left
+   * their marks behind still has highlights on the page, and those need a name and a
+   * color next to them. Callers that mean "who is in this book right now" filter on
+   * revokedAt themselves.
+   */
   async listMembers(docId) {
     const { data } = await this.sb.from('memberships').select('*').eq('document_id', docId);
     return (data ?? []).map((m) => ({
       docId: m.document_id, userId: m.user_id, name: m.display_name, color: m.color,
+      revokedAt: m.revoked_at ? Date.parse(m.revoked_at) : null,
     }));
   }
 
@@ -282,28 +452,115 @@ export class SupabaseStore {
     });
   }
 
+  /**
+   * Every book's readers in one round trip, for the shelf badges. Doing this per card
+   * would be one request per book on every render of the library screen — the same
+   * mistake the cover column exists to avoid (see putDocument).
+   */
+  async listMembersByDocument(docIds) {
+    if (!docIds.length) return new Map();
+    const { data, error } = await this.sb
+      .from('memberships')
+      .select('document_id,user_id,display_name,color')
+      .in('document_id', docIds).is('revoked_at', null);
+    if (error) throw error;
+    const out = new Map();
+    for (const m of data ?? []) {
+      const list = out.get(m.document_id) ?? [];
+      list.push({ userId: m.user_id, name: m.display_name, color: m.color });
+      out.set(m.document_id, list);
+    }
+    return out;
+  }
+
+  /**
+   * A DELETE arrives with an empty `new` and the removed row in `old`. Reading `new`
+   * unconditionally turned every removal into a row of undefineds, which downstream read
+   * as a member with no id. Membership removals are soft now (revoked_at), so this
+   * mostly guards annotations — but a hard delete has to be a removal, not a ghost.
+   */
   subscribe(docId, cb) {
+    const rowOf = (p) => (p.eventType === 'DELETE' ? p.old : p.new) ?? {};
     const ch = this.sb
       .channel(`doc:${docId}`)
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'annotations', filter: `document_id=eq.${docId}` },
-        (p) => cb({ kind: 'annotation', row: toCamel(p.new) }))
+        (p) => {
+          const row = rowOf(p);
+          if (!row.id) return;
+          cb({
+            kind: 'annotation',
+            row: p.eventType === 'DELETE'
+              ? { ...toCamel(row), deletedAt: Date.now() }
+              : toCamel(row),
+          });
+        })
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'progress', filter: `document_id=eq.${docId}` },
-        (p) => cb({
-          kind: 'progress',
-          row: { userId: p.new.user_id, page: p.new.page, yFrac: p.new.y_frac,
-                 cfi: p.new.cfi, percent: p.new.percent,
-                 updatedAt: Date.parse(p.new.updated_at) },
-        }))
+        (p) => {
+          const r = rowOf(p);
+          if (!r.user_id) return;
+          cb({
+            kind: 'progress',
+            row: { userId: r.user_id, page: r.page, yFrac: r.y_frac,
+                   cfi: r.cfi, percent: r.percent,
+                   updatedAt: Date.parse(r.updated_at) },
+          });
+        })
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'memberships', filter: `document_id=eq.${docId}` },
-        (p) => cb({
-          kind: 'member',
-          row: { docId, userId: p.new.user_id, name: p.new.display_name, color: p.new.color },
-        }))
+        (p) => {
+          const r = rowOf(p);
+          if (!r.user_id) return;
+          cb({
+            kind: 'member',
+            row: {
+              docId, userId: r.user_id, name: r.display_name, color: r.color,
+              revokedAt: r.revoked_at ? Date.parse(r.revoked_at) : null,
+              // A hard delete of the row is a removal; a revoke is a state change.
+              removed: p.eventType === 'DELETE',
+            },
+          });
+        })
       .subscribe();
     this.channels.set(docId, ch);
+    return () => {
+      this.channels.delete(docId);
+      this.sb.removeChannel(ch);
+    };
+  }
+
+  /**
+   * Per-user, not per-document — the first channel in the app that isn't scoped to an
+   * open book. It exists because the two things you most need to hear about arrive while
+   * you're sitting on the shelf with nothing open: someone shared a book with you, or
+   * someone connected to you.
+   *
+   * `connections` carries no filter: the pair is stored ordered, so neither column
+   * reliably holds you, and RLS plus replica identity already restrict the rows to yours.
+   */
+  subscribeUser(cb) {
+    const ch = this.sb
+      .channel(`user:${this.user.id}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'memberships',
+          filter: `user_id=eq.${this.user.id}` },
+        (p) => {
+          const r = (p.eventType === 'DELETE' ? p.old : p.new) ?? {};
+          if (!r.document_id) return;
+          cb({
+            kind: 'share',
+            row: {
+              docId: r.document_id,
+              revokedAt: r.revoked_at ? Date.parse(r.revoked_at) : null,
+              removed: p.eventType === 'DELETE',
+            },
+          });
+        })
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'connections' },
+        () => cb({ kind: 'connection' }))
+      .subscribe();
     return () => this.sb.removeChannel(ch);
   }
 }

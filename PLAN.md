@@ -1,9 +1,11 @@
-# Marginalia — a two-person shared PDF reader
+# Marginalia — a shared PDF reader
 
 **Technical plan, annotated with model selection per phase.**
 
 You and one other person open the same DRM-free PDF, each keep your own place in it,
-and leave highlights, typed notes, and stylus ink that the other person sees.
+and leave highlights, typed notes, and stylus ink that the other person sees. That's
+still the whole idea; Phase 9 below extends "one other person" to a group without
+changing anything above it.
 
 ---
 
@@ -16,7 +18,7 @@ Almost everything here is easy. Four things are not, and they're where the plan 
 | **Anchoring** | A highlight drawn at 1.4× zoom on a 13" laptop must land on the same words at 0.8× on a phone. Coordinates cannot be stored in pixels. |
 | **Stylus capture** | Pen, touch, and mouse all fire `pointer` events. Getting smooth ink while palm-rejecting and still letting touch scroll the page is fiddly. |
 | **Layer order** | pdf.js renders to `<canvas>`; text selection needs an invisible DOM text layer on top; ink needs a canvas on top of *that*; highlights need to show through. Four stacked layers per page, all pixel-aligned. |
-| **Two writers** | Not a hard distributed-systems problem — it's two people, usually asleep in different timezones. Resist building a CRDT. |
+| **Concurrent writers** | Not a hard distributed-systems problem even once "two" became "a few" in Phase 9 — rows are per-user and only their author edits them, so a real conflict still needs the same person in two tabs. Resist building a CRDT. |
 
 Everything else (auth, upload, UI) is ordinary work.
 
@@ -94,6 +96,12 @@ A 3-second stroke goes from ~400 raw points to ~40 with no visible loss.
 ---
 
 ## 3. Data model
+
+The sketch below is the original, PDF-only shape from this phase. It's kept as-is for the
+history; the model that actually shipped is `schema.sql` (adds EPUB: `format`, `cfi`,
+`spine_index`, `epub_locations`) plus `social.sql` (adds `profiles`, `connections`,
+`invites`, and the membership/annotation lifecycle columns that Phase 9 needed). Those two
+files are the source of truth — see README "Backend architecture" for the current model.
 
 ```sql
 documents(id, title, storage_path, page_count, sha256, created_by, created_at)
@@ -219,7 +227,7 @@ RLS policies. Tuning effort within one model is a better first lever than swappi
 | 900-page books stall on load | Range requests + `rangeChunkSize`; lazily correct page sizes instead of calling `getPage` 900 times upfront |
 | Someone re-uploads a different edition | `sha256` check on load; refuse and explain rather than render 400 misplaced highlights |
 | iOS Safari pointer events | Test on real hardware early — `getCoalescedEvents` support and pressure behavior differ from Chrome |
-| Scope creep into a CRDT | Two people. Last-write-wins. |
+| Scope creep into a CRDT | Rows are per-user and per-author. Last-write-wins, even at group size. |
 
 ---
 
@@ -228,4 +236,45 @@ RLS policies. Tuning effort within one model is a better first lever than swappi
 The prototype in `src/` implements Phases 1–3 and the Phase 5 interface, running fully
 locally against IndexedDB: render, virtualized scroll, per-user progress, text selection,
 highlights, typed notes, stylus ink with pressure, per-user color, and the spine.
-`supabase-adapter.js` and `schema.sql` are the drop-in for Phases 4–5.
+`supabase-adapter.js` and `schema.sql` are the drop-in for Phases 4–5. Phase 9 adds
+`social.sql` and the People/share UI on top of that — see below.
+
+---
+
+## 9. The social layer: from a pair to a group
+
+The original design fixed the reader count at two and used that fact directly for
+security (a book capped at two readers means a leaked invite link stops mattering the
+moment the second person joins — see the old `join_document`). Opening that up to a
+group meant finding a different place for that guarantee to live, not just raising the
+cap. It now lives in the invite token itself: single-use, two-week expiry, and a check
+that a revoked reader can't rejoin on an old link.
+
+Two ideas that weren't needed at all with exactly two people: a **connection** between
+two accounts, independent of any book, and a **grant** that shares one specific book with
+someone you're connected to. Splitting them is what makes "remove someone from this book"
+and "stop knowing this person entirely" two different actions instead of one.
+
+The other new question a pair never has to ask: what happens when two people
+independently add the same book? Anchors (PDF rects and text-item indexes, EPUB CFIs) are
+all properties of one specific file, so the honest answer is that highlights only ever
+transfer between byte-identical copies — verified by `sha256`, not by title or metadata
+matching. `merge_documents` is the one truly irreversible operation added in this phase:
+it repoints every annotation and progress row and deletes the losing document. It's
+guarded by re-checking the hash server-side (never trusting a client's earlier claim of a
+match) and by only letting the person giving up their own copy call it.
+
+> **Opus, high effort**, for `social.sql`'s RLS and RPCs, and for the group-spread rail
+> math in `app.js` (`renderSpine`, `clusterPositions`) — the second because the phase's
+> one hard constraint was that at exactly two readers, none of it may visibly change.
+> That was checked by transcribing the old and new band math and running both against
+> 200,000 randomized two-reader cases, not by eyeballing the diff.
+> **Sonnet** for the People screen, share dialog, and shelf badges — DOM and CSS against
+> conventions the rest of the app already documents closely (see README's design-token
+> and dialog-pattern notes), where the risk is mostly volume, not subtlety.
+
+What's still open: whole-library sharing (share every book you add, automatically, with
+someone) was scoped for this phase and deliberately dropped. A trigger that fans out
+membership on every upload cuts against the rest of the design, which is built around an
+explicit per-book decision every time — see README "Reading with other people" for what
+shipped instead.

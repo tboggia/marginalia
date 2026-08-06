@@ -98,3 +98,12 @@ create policy delete_books on storage.objects for delete
   );
 
 commit;
+
+-- ---------------------------------------------------------------- what's next
+-- This file stops at the EPUB-era schema. The social layer — profiles, connections,
+-- invites, per-book sharing and revocation — lives in social.sql. Run that next.
+--
+-- Order matters and nothing here anticipates it: this file never added the invite_code
+-- column or join_document (invites postdate it), so a database brought forward with this
+-- file has no invites at all. social.sql detects that case and skips the invite_code
+-- migration rather than failing, so it is safe to run after this file or after schema.sql.

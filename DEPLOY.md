@@ -1,11 +1,11 @@
 # Deploying
 
-About 30 minutes, most of it waiting on Supabase. Free tier covers two people reading
-books by roughly four orders of magnitude.
+About 30 minutes, most of it waiting on Supabase. Free tier covers a small reading
+group by roughly four orders of magnitude.
 
 The order matters: **do the backend first.** Static hosting takes five minutes and is
-the easy half, but a URL with no backend gives you and your partner two separate
-private libraries that share nothing. It'll look like it works. It won't.
+the easy half, but a URL with no backend gives everyone their own separate private
+library that shares nothing. It'll look like it works. It won't.
 
 ---
 
@@ -14,15 +14,21 @@ private libraries that share nothing. It'll look like it works. It won't.
 1. Create a project at [supabase.com](https://supabase.com). Save the database
    password somewhere; you won't need it for this, but you'll want it eventually.
 2. **SQL Editor** → paste all of `schema.sql` → Run. It should report success with no
-   rows. This creates four tables, ten RLS policies, and the invite functions.
-3. **Storage** → New bucket → name it `books` → **leave "Public bucket" OFF.** If you
+   rows. This creates the reader's own tables, RLS policies, and storage policies.
+3. **SQL Editor** → paste all of `social.sql` → Run, in a second statement after
+   `schema.sql` has already run. This adds `profiles`, `connections`, `invites`, the
+   sharing and revocation functions, and the realtime fix described below. Bringing an
+   existing pre-social database forward: run `migration.sql` first if you haven't
+   already (it predates invites entirely), then `social.sql` — it detects which case
+   you're in and adjusts what it migrates accordingly.
+4. **Storage** → New bucket → name it `books` → **leave "Public bucket" OFF.** If you
    turn it on, anyone who guesses a filename downloads your books, and the storage
    policies in `schema.sql` become decoration.
-4. **Authentication → URL Configuration** → set **Site URL** to your deployed URL, and
+5. **Authentication → URL Configuration** → set **Site URL** to your deployed URL, and
    add it to **Redirect URLs** too. Magic links bounce to the site root if the URL
    they were issued for isn't listed. This is the single most common thing to get
    wrong, and it fails quietly.
-5. **Project Settings → API** → copy the **Project URL** and the **anon / publishable**
+6. **Project Settings → API** → copy the **Project URL** and the **anon / publishable**
    key into `src/config.js`.
 
 > **The `anon` key is public and belongs in your git history.** It identifies the
@@ -42,10 +48,32 @@ works, for everyone, forever. In the SQL editor:
 -- Should return zero rows. If it returns your annotations, RLS is off somewhere.
 set role anon;
 select * from annotations;
+select * from profiles;
+select * from connections;
 reset role;
 ```
 
-Then sign in as a third account in a private window and confirm you can't see the book.
+Then sign in as a third account in a private window and confirm you can't see the book
+until you're actually shared into it — and that you can't see someone's profile or
+connections unless you're connected to them or share a book with them.
+
+Two Postgres-side checks worth running once, since a missing one fails silently rather
+than with an error:
+
+```sql
+-- Should return 'f' for all four. A row here means the realtime socket is broadcasting
+-- that table's changes to every subscriber regardless of RLS.
+select relname, relreplident = 'f' as full_identity
+from pg_class where relname in ('annotations','progress','memberships','connections');
+```
+
+```sql
+-- redeem_invite, share_document, and revoke_share should all show prosecdef = true
+-- (security definer). If any come back false, RLS applies to the function's own
+-- queries and it will 403 on the exact gap it exists to cross.
+select proname, prosecdef from pg_proc
+where proname in ('redeem_invite','share_document','revoke_share','merge_documents');
+```
 
 ---
 
@@ -126,21 +154,41 @@ HTTPS is on by default on `github.io`, so the clipboard-based invite button work
 ### Limits
 
 A recommended 1 GB repo limit, a 1 GB published-site limit, and a soft 100 GB/month
-bandwidth limit. Irrelevant for two people and a few hundred KB of JS — as long as the
-books stay out of the repo. If you commit a 40 MB scan and both re-read it, you're
-suddenly using Pages as a CDN for a book, which is both against the point and against
-the terms.
+bandwidth limit. Irrelevant for a small reading group and a few hundred KB of JS — as
+long as the books stay out of the repo. If you commit a 40 MB scan and everyone
+re-reads it, you're suddenly using Pages as a CDN for a book, which is both against the
+point and against the terms.
 
 ---
 
 ## 3. Reading together
 
-1. You sign in, upload the PDF or EPUB, hit **Invite**, and send the link.
-2. Your partner opens it, signs in, and lands in the book.
-3. The link is now spent. `join_document` caps a book at two readers, so a leaked
-   link opens nothing once you're both in. If a link leaks *before* they use it,
-   `select rotate_invite('<document-id>')` issues a new one — it kicks nobody out,
-   it only stops future joins.
+There's no cap on readers anymore, and two things are worth telling people before they
+use it: only the person who adds a book decides who else reads it, and links are
+single-use with a two-week expiry rather than living forever.
+
+**Sharing a book you added:**
+
+1. Sign in, upload the PDF or EPUB, hit **Invite**.
+2. If the person you want is already in your People list, add them straight from the
+   share sheet — no link needed. Otherwise, **Copy invite link** and send it.
+3. They open it, sign in, and land in the book. The link is now spent — a second click
+   on it is refused with a readable message, not a silent no-op. If it leaks before
+   they use it, open the share sheet and copy a fresh one; the old one just expires.
+
+**Connecting without sharing a book yet:** the **People** button (next to "Add a book")
+has its own "Invite someone" link. Whoever opens it is connected to you with nothing
+shared — connecting is the handshake, sharing a specific book is a separate step from
+the share sheet once you're connected.
+
+**Being shared a book you didn't add:** you can read, highlight, and leave whenever you
+like, but you can't invite anyone else into it or remove another reader — only the owner
+can. The share sheet shows you which one you are.
+
+**The same book twice:** if you add a book someone has already shared with you, and the
+files are byte-identical, your shelf offers a merge — your copy folds into theirs and
+every highlight either of you made lands exactly where it already was. Different scans
+of the same title are never merged.
 
 ---
 
@@ -155,17 +203,26 @@ the terms.
 | Highlights save but the other person never sees them | Realtime isn't publishing. Re-run the `alter publication` lines. |
 | Realtime works but leaks | `replica identity full` didn't run. Without it the socket ignores RLS. |
 | Invite button does nothing | Not HTTPS. Clipboard needs a secure context; it falls back to a prompt. |
+| Invite button is greyed out, with a tooltip | You're not the owner of the open book. Only the person who added it can share it — ask them, or use the share sheet's "Add someone you're connected to" if you're already connected and they've shared it with you. |
+| "That invite link has already been used" on a link that's never been clicked | It's expired (two weeks by default) or was revoked. Mint a new one from the share sheet. |
+| Someone you removed gets back in on their old link | Shouldn't happen — `redeem_invite` checks for a revoked membership before honoring a link. If it does, `social.sql` didn't fully apply; re-run it. |
+| The merge banner never appears for an obvious duplicate | `find_my_duplicates` only matches on exact `sha256`. Two different scans of the same title, or a re-exported PDF, are different bytes and are never offered a merge — this is intentional, not a bug. |
 
 ---
 
 ## Before you put a real book in it
 
-- **Rate-limit `join_document`.** It's the one function reachable by any signed-in
-  user, and it's a guessing oracle. 64 bits is a lot to guess, but Supabase's
-  built-in rate limits are worth turning on.
-- **Turn off public sign-ups**, or anyone can make an account on your project. They
-  can't see your books — RLS handles that — but they're in your user table and your
-  quota. Authentication → Providers → email → disable sign-ups once you've both
-  registered. This is the cheapest security win available.
-- **Storage has no quota per user.** It's you and one other person, so this is fine
-  until it isn't.
+- **Rate-limit `redeem_invite`.** It's the one function reachable by any signed-in
+  user with nothing but a guessed string, and it's a guessing oracle. 64 bits is a
+  lot to guess, but Supabase's built-in rate limits are worth turning on.
+- **Public sign-ups have to stay on.** This is a real change from the two-person
+  design, which used to recommend disabling them once both people had registered —
+  that advice now directly breaks the product: every new person you invite, connect
+  or share a book with needs to be able to create an account first. RLS is what
+  actually keeps a stranger with an account from seeing your books, not a closed
+  signup form — an account with no membership row sees nothing, same as before.
+  If you want to restrict *who* can sign up at all (not just who can see your
+  books), Supabase supports allow-listing by email domain under Authentication →
+  Providers → email, which doesn't have this problem.
+- **Storage has no quota per user.** Fine for a household or a small reading group;
+  worth watching once a book is genuinely shared with more than a couple of people.

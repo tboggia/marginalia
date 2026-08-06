@@ -74,7 +74,9 @@ const store = isHosted()
       const { SupabaseStore } = await import('./supabase-adapter.js');
       return new SupabaseStore(config.supabaseUrl, config.supabaseAnonKey);
     })()
-  : new LocalStore();
+  // uidKey so the local profile lands under the same ?me= alias the rest of identity
+  // uses — two aliased tabs are two people and must not share a name and color.
+  : new LocalStore(uidKey);
 
 // Created fresh per doc in openDoc — a session can open a PDF, close it, and open an
 // EPUB (or another PDF) without a reload, so this can't be a single instance anymore.
@@ -93,7 +95,18 @@ const colorOf = (userId) =>
   members.find((m) => m.userId === userId)?.color ?? me.color;
 const nameOf = (userId) =>
   userId === me.id ? me.name : members.find((m) => m.userId === userId)?.name ?? 'Them';
-const other = () => members.find((m) => m.userId !== me.id) ?? null;
+/**
+ * Everyone but you who is still in this book.
+ *
+ * This replaced a single `other()`, which took the first non-me member and ignored the
+ * rest — fine when a book held two people, wrong now. Revoked members stay in `members`
+ * on purpose (their old highlights still need a name and a color beside them) and are
+ * filtered out here, because they are no longer *reading* it.
+ */
+const others = () => members.filter((m) => m.userId !== me.id && !m.revokedAt);
+/** Members whose access has ended: their marks may remain, their position does not. */
+const revokedIds = () =>
+  new Set(members.filter((m) => m.revokedAt).map((m) => m.userId));
 
 // PDF annotations group by page number; EPUB has no fixed page, so they group by
 // spine index instead — the same coarse "which chunk of the book" role, different unit.
@@ -147,20 +160,20 @@ async function boot() {
       );
     }
     if (!store.user) return showAuth();
+    // The profile row is the record now, not localStorage. It has to be: a name that
+    // lives only in this browser can't appear in anyone else's people list, and it
+    // reverts the moment you sign in on a second device. The local prefs are kept as a
+    // fallback for the first load after sign-in, before the row is read.
+    const profile = await store.getProfile();
     me = {
       id: store.user.id,
-      // The who-dialog's saved name wins over the session's, for the same reason the
-      // color below does: without it the dialog appears to work and then reverts to
-      // the email local-part on the next load.
-      name: pref(
-        uidKey + ':name',
-        store.user.user_metadata?.name ?? store.user.email?.split('@')[0] ?? 'You'
-      ),
-      // Same key the who-dialog writes (uidKey + ':color'). This used to read
-      // 'marginalia:color', which nothing ever wrote — so the picked color
-      // silently reverted to amber on every refresh in hosted mode.
-      color: pref(uidKey + ':color', COLORS[0].hex),
+      name: profile.name
+        ?? pref(uidKey + ':name',
+             store.user.user_metadata?.name ?? store.user.email?.split('@')[0] ?? 'You'),
+      color: profile.color ?? pref(uidKey + ':color', COLORS[0].hex),
     };
+    setPref(uidKey + ':name', me.name);
+    setPref(uidKey + ':color', me.color);
     $('#auth').hidden = true;
   }
 
@@ -169,6 +182,8 @@ async function boot() {
   bindSelection();
   bindNoteDialog();
   bindWhoDialog();
+  bindPeople();
+  bindShareDialog();
   $('#t-who').textContent = me.name;
   await renderShelf();
   await handleInviteLink();
@@ -176,10 +191,12 @@ async function boot() {
   // opened a book), so this is the first moment the drop screen can appear without
   // flashing beneath a sign-in overlay.
   if (!docId) $('#start').hidden = false;
+  $('#boot').hidden = true;
 }
 
 /* ------------------------------------------------------------------- auth */
 function showAuth() {
+  $('#boot').hidden = true;
   $('#auth').hidden = false;
   const code = params.get('join');
   if (code) {
@@ -210,32 +227,74 @@ function showAuth() {
 }
 
 /* ----------------------------------------------------------------- invites */
+/**
+ * Two kinds of link arrive on the same ?join= parameter. A book invite opens the book, as
+ * it always did. A connect invite only links the two accounts, so it lands on the people
+ * screen \u2014 there is no book to open, and dropping the user on an empty shelf after they
+ * clicked an invitation reads as a failure.
+ *
+ * The parameter keeps its old name so links already sent still work.
+ */
 async function handleInviteLink() {
   const code = params.get('join');
   if (!code) return;
   if (!isHosted()) return toast('Invite links need a backend. See DEPLOY.md.');
 
   try {
-    const id = await store.joinByCode(code, me.name);
+    const { kind, docId: id } = await store.redeemInvite(code, me.name);
     // Strip the code once it's been redeemed, so a reload isn't a second join and
     // the URL in the address bar stops being a live credential.
     history.replaceState({}, '', location.pathname);
-    const docs = await store.listDocuments();
-    const doc = docs.find((d) => d.id === id);
-    await openDoc(id, { title: doc?.title ?? 'Shared book', author: doc?.author, format: doc?.format });
-    toast('You\u2019re in.');
+
+    if (kind === 'book' && id) {
+      const docs = await store.listDocuments();
+      const doc = docs.find((d) => d.id === id);
+      await openDoc(id, {
+        title: doc?.title ?? 'Shared book', author: doc?.author, format: doc?.format,
+      });
+      toast('You\u2019re in.');
+      return;
+    }
+
+    await renderShelf();
+    await showPeople();
+    toast('You\u2019re connected.');
   } catch (e) {
     toast(e.message);
   }
 }
 
+/**
+ * A book invite. Single-use and dated by default (see createInvite in the adapter), which
+ * is what replaced the old two-reader cap: the cap used to be the thing that made a
+ * leaked link stop mattering, and with the cap gone the token has to carry that itself.
+ */
 async function copyInvite() {
-  const code = await store.getInviteCode(docId);
-  if (!code) return toast('Invite links need a backend. See DEPLOY.md.');
+  if (!isHosted()) return toast('Invite links need a backend. See DEPLOY.md.');
+  try {
+    const { code } = await store.createInvite({ kind: 'book', docId });
+    await shareLink(code, 'Invite link copied. It works once, and expires in two weeks.');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+/** A connection invite \u2014 no book attached, just the handshake. */
+async function copyConnectInvite() {
+  if (!isHosted()) return toast('Invite links need a backend. See DEPLOY.md.');
+  try {
+    const { code } = await store.createInvite({ kind: 'connect' });
+    await shareLink(code, 'Invite link copied. It works once, and expires in two weeks.');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function shareLink(code, message) {
   const url = location.origin + location.pathname + '?join=' + code;
   try {
     await navigator.clipboard.writeText(url);
-    toast('Invite link copied. It works once, for one person.');
+    toast(message);
   } catch {
     // Clipboard needs a secure context and a user gesture; if either is missing,
     // show the link rather than silently doing nothing.
@@ -264,16 +323,119 @@ function jacketColors(seed) {
   return [`hsl(${hue} 28% 26%)`, `hsl(${(hue + 34) % 360} 32% 14%)`];
 }
 
-function bookCard(d, onOpen, onDelete) {
+/**
+ * Two letters standing in for a person where there's no room for a name. Array.from,
+ * not slice: a name starting with an emoji or any astral character would otherwise be
+ * cut through the middle of a surrogate pair and render as a replacement glyph.
+ */
+function initials(name) {
+  const parts = String(name ?? '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  const first = Array.from(parts[0]);
+  if (parts.length === 1) return first.slice(0, 2).join('').toUpperCase();
+  return (first[0] + Array.from(parts[parts.length - 1])[0]).toUpperCase();
+}
+
+/**
+ * The colored disc for a person. Used by the people list, the share sheet, and the
+ * stack on a book cover — one element, sized by a custom property so the three callers
+ * don't each need their own class.
+ *
+ * Always aria-hidden. It carries no information the surrounding text doesn't already:
+ * next to a name it repeats it, and on a cover the card's own label lists the readers.
+ */
+function avatarEl(person, size) {
+  const el = document.createElement('span');
+  el.className = 'avatar';
+  if (size) el.style.setProperty('--avatar-size', size + 'px');
+  el.style.setProperty('--avatar-color', person.color ?? COLORS[0].hex);
+  el.textContent = initials(person.name);
+  el.setAttribute('aria-hidden', 'true');
+  return el;
+}
+
+/**
+ * A person as a list row: disc, name, one line of context, and an optional action.
+ * Shared by the people screen and the share sheet, which want the same object with
+ * different verbs attached.
+ *
+ * The row is a <div>. The disclosure and the action are siblings inside it, because a
+ * button nested in a button is invalid and the inner one is unreachable by keyboard.
+ */
+function personRow(person, { meta, action, onToggle, controls } = {}) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  if (person.revokedAt) row.dataset.revoked = 'true';
+  row.appendChild(avatarEl(person));
+
+  // The name block is a button only when there's something to disclose; otherwise it's
+  // static text and must not look or behave like a control.
+  const main = document.createElement(onToggle ? 'button' : 'div');
+  main.className = 'row-main';
+  if (onToggle) {
+    main.type = 'button';
+    main.setAttribute('aria-expanded', 'false');
+    if (controls) main.setAttribute('aria-controls', controls);
+    main.onclick = () => onToggle(main);
+  }
+
+  const text = document.createElement('span');
+  text.className = 'row-text';
+  const name = document.createElement('span');
+  name.className = 'row-name';
+  name.textContent = person.name;
+  text.appendChild(name);
+  if (meta) {
+    const m = document.createElement('span');
+    m.className = 'row-meta';
+    m.textContent = meta;
+    text.appendChild(m);
+  }
+  main.appendChild(text);
+
+  if (onToggle) {
+    const chev = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    chev.setAttribute('class', 'row-chev');
+    chev.setAttribute('viewBox', '0 0 24 24');
+    chev.setAttribute('aria-hidden', 'true');
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('d', 'M9 5l7 7-7 7');
+    chev.appendChild(p);
+    main.appendChild(chev);
+  }
+  row.appendChild(main);
+
+  if (action) {
+    const act = document.createElement('button');
+    act.type = 'button';
+    act.className = 'row-act';
+    act.textContent = action.label;
+    // The visible label is a bare verb, which says nothing out of context.
+    act.setAttribute('aria-label', `${action.label} ${person.name}`);
+    act.onclick = action.onClick;
+    row.appendChild(act);
+  }
+
+  return row;
+}
+
+function bookCard(d, { onOpen, onDelete, members = [] } = {}) {
   const card = document.createElement('div');
   card.className = 'book';
 
   const open = document.createElement('button');
   open.className = 'book-open';
-  // The card is one button with one name. Cover, title, and author are all the same
-  // target, so the accessible name says the whole thing once instead of three times.
+  // The card is one button with one name. Cover, title, author, and the reader stack
+  // are all the same target, so the accessible name says the whole thing once instead
+  // of four times — the discs in particular are aria-hidden and named only here.
+  // Not `others` — that's the module-level function for the open book's readers, and
+  // this is a shelf card for a book that isn't open.
+  const otherReaders = members.filter((m) => m.userId !== me.id);
+  const shared = otherReaders.length
+    ? `, shared with ${otherReaders.map((m) => m.name).join(', ')}`
+    : '';
   open.setAttribute('aria-label',
-    `Open ${d.title}${d.author ? `, by ${d.author}` : ''} (${d.format.toUpperCase()})`);
+    `Open ${d.title}${d.author ? `, by ${d.author}` : ''} (${d.format.toUpperCase()})${shared}`);
 
   const cover = document.createElement('div');
   cover.className = 'cover';
@@ -299,6 +461,21 @@ function bookCard(d, onOpen, onDelete) {
   fmt.className = 'fmt';
   fmt.textContent = d.format.toUpperCase();
   cover.appendChild(fmt);
+
+  // Who else is in this book, without opening it. Capped at three discs plus a count,
+  // because past that they stop being recognizable faces and become a smear.
+  if (otherReaders.length) {
+    const stack = document.createElement('span');
+    stack.className = 'stack';
+    for (const m of otherReaders.slice(0, 3)) stack.appendChild(avatarEl(m));
+    if (otherReaders.length > 3) {
+      // --muted, not --edge: the avatar sets its text to --ink, which clears 4.5:1 on
+      // --muted (8.3:1) and does not on --edge.
+      stack.appendChild(avatarEl({ name: `+${otherReaders.length - 3}`, color: 'var(--muted)' }));
+    }
+    cover.appendChild(stack);
+  }
+
   open.appendChild(cover);
 
   const title = document.createElement('div');
@@ -316,13 +493,17 @@ function bookCard(d, onOpen, onDelete) {
   open.onclick = onOpen;
   card.appendChild(open);
 
-  const del = document.createElement('button');
-  del.className = 'book-del';
-  del.title = 'Delete this book';
-  del.setAttribute('aria-label', `Delete ${d.title}`);
-  del.textContent = '✕';
-  del.onclick = onDelete;
-  card.appendChild(del);
+  // Omitted where the card is just a reference to a book — the people screen lists the
+  // books you share with someone, and deleting one from there would be a trapdoor.
+  if (onDelete) {
+    const del = document.createElement('button');
+    del.className = 'book-del';
+    del.title = 'Delete this book';
+    del.setAttribute('aria-label', `Delete ${d.title}`);
+    del.textContent = '✕';
+    del.onclick = onDelete;
+    card.appendChild(del);
+  }
 
   return card;
 }
@@ -341,24 +522,47 @@ async function renderShelf() {
   // there's nothing to open yet.
   $('#start').dataset.empty = String(!docs.length);
   $('#shelf').hidden = !docs.length;
+  // Deliberately not awaited: the duplicates banner is independent of the shelf and
+  // must never delay it. With no books there is nothing to be a duplicate of.
+  if (docs.length) renderDupes();
   if (!docs.length) return;
 
+  // One request for every book's readers, not one per card. A shelf of forty books
+  // would otherwise open forty connections before it drew anything. A failure here
+  // costs the badges and nothing else, so it must not take the shelf down with it.
+  let membersByDoc = new Map();
+  try {
+    membersByDoc = await store.listMembersByDocument(docs.map((d) => d.id));
+  } catch {
+    /* badges are a nicety; the shelf still opens books without them */
+  }
+
+  // Built detached and appended once: forty cards appended individually is forty
+  // chances for the browser to reflow a grid it is going to rewrite anyway.
+  const frag = document.createDocumentFragment();
+
   for (const d of docs) {
-    const card = bookCard(
-      d,
-      () => openDoc(d.id, d),
-      async (e) => {
+    const card = bookCard(d, {
+      members: membersByDoc.get(d.id) ?? [],
+      onOpen: () => openDoc(d.id, d),
+      onDelete: async (e) => {
         e.stopPropagation();
-        if (!confirm(`Delete "${d.title}"? This removes it — and its highlights and notes — for both of you.`)) return;
+        const otherReaders = (membersByDoc.get(d.id) ?? []).filter((m) => m.userId !== me.id);
+        // The old copy said "for both of you" unconditionally, which was wrong the
+        // moment a book could have one reader or four.
+        const who = otherReaders.length
+          ? ` This removes it — and its highlights and notes — for ${otherReaders.map((m) => m.name).join(', ')} too.`
+          : ' This removes it, and its highlights and notes.';
+        if (!confirm(`Delete "${d.title}"?${who}`)) return;
         try {
           await store.deleteDocument(d.id);
           await renderShelf();
         } catch (err) {
           toast(err.message ?? 'That book didn’t delete.');
         }
-      }
-    );
-    el.appendChild(card);
+      },
+    });
+    frag.appendChild(card);
 
     // After the card is on screen, not before: the jacket is a real answer, so the
     // shelf never waits on a thumbnail it may not even be able to produce.
@@ -371,6 +575,262 @@ async function renderShelf() {
         card.querySelector('.cover .jacket')?.replaceWith(img);
       });
     }
+  }
+
+  el.appendChild(frag);
+}
+
+/* --------------------------------------------------------------- duplicates
+   You added a book; someone shared you their copy of the same file. Two rows,
+   two ids, and no highlight passes between them.
+
+   Merging is only ever offered for byte-identical files, and that restriction is
+   the whole reason it's safe. Every anchor the app stores belongs to one
+   particular file: PDF highlights are page rects plus indexes into that file's
+   text-item array, EPUB highlights are CFIs into that build's DOM. Move them to a
+   different scan of the same book and they land on the wrong words. Move them
+   between two copies of identical bytes and every one of them still fits.
+
+   You can only ever give up a copy you added yourself — see merge_documents. */
+
+const DISMISSED_DUPES = 'marginalia:dupes-dismissed';
+
+function dismissedDupes() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(DISMISSED_DUPES) ?? '[]'));
+  } catch {
+    return new Set();
+  }
+}
+
+async function renderDupes() {
+  const section = $('#dupes');
+  const list = $('#dupes-list');
+  list.innerHTML = '';
+  section.hidden = true;
+  if (!isHosted()) return;
+
+  let dupes;
+  try {
+    dupes = await store.listDuplicates();
+  } catch {
+    return; // a nicety; never let it take the shelf down
+  }
+
+  const dismissed = dismissedDupes();
+  dupes = dupes.filter((d) => !dismissed.has(`${d.mineId}:${d.theirsId}`));
+  if (!dupes.length) return;
+
+  section.hidden = false;
+  const frag = document.createDocumentFragment();
+  for (const d of dupes) frag.appendChild(dupeRow(d));
+  list.appendChild(frag);
+}
+
+function dupeRow(d) {
+  const row = document.createElement('div');
+  row.className = 'row';
+
+  const main = document.createElement('div');
+  main.className = 'row-main';
+  const name = document.createElement('span');
+  name.className = 'row-name';
+  name.textContent = d.mineTitle;
+  const note = document.createElement('span');
+  note.className = 'row-note';
+  note.textContent =
+    `You and ${d.ownerName} each added this, and the files are identical. ` +
+    `Merge and you'll read the same copy — every highlight either of you has ` +
+    `already made stays exactly where it is.`;
+  main.append(name, note);
+
+  const acts = document.createElement('div');
+  acts.className = 'row-acts';
+
+  const merge = document.createElement('button');
+  merge.type = 'button';
+  merge.className = 'btn primary';
+  merge.textContent = 'Merge';
+  merge.setAttribute('aria-label', `Merge your copy of ${d.mineTitle} into ${d.ownerName}'s`);
+  merge.onclick = () => mergeDupe(d, merge);
+
+  const keep = document.createElement('button');
+  keep.type = 'button';
+  keep.className = 'btn';
+  keep.textContent = 'Keep separate';
+  keep.setAttribute('aria-label', `Keep both copies of ${d.mineTitle}`);
+  keep.onclick = () => {
+    const dismissed = dismissedDupes();
+    dismissed.add(`${d.mineId}:${d.theirsId}`);
+    setPref(DISMISSED_DUPES, JSON.stringify([...dismissed]));
+    renderDupes();
+  };
+
+  acts.append(merge, keep);
+  row.append(main, acts);
+  return row;
+}
+
+async function mergeDupe(d, btn) {
+  if (!confirm(
+    `Merge your copy of "${d.mineTitle}" into ${d.ownerName}'s?\n\n` +
+    `Your highlights and your place move across and stay where they are — the files ` +
+    `are identical, so every one of them still fits. Your copy of the book is then ` +
+    `removed. This can't be undone.`
+  )) return;
+
+  btn.disabled = true;
+  showLoading('Merging…');
+  try {
+    // theirs is kept, mine is given up. The server enforces that direction; passing
+    // them the other way round would be refused rather than silently deleting a book
+    // that isn't ours.
+    await store.mergeDocuments(d.theirsId, d.mineId);
+    // The open book may be the one that just stopped existing.
+    if (docId === d.mineId) closeDoc();
+    await renderShelf();
+    await renderDupes();
+    toast('Merged. You’re reading the same copy now.');
+  } catch (e) {
+    btn.disabled = false;
+    toast(e.message);
+  } finally {
+    hideLoading();
+  }
+}
+
+/* ------------------------------------------------------------------- people
+   Who you read with, and what you hold in common. The count answers the
+   question most of the time, so the covers are a disclosure rather than the
+   default — and they're fetched only when a row is opened, which keeps the
+   screen one request no matter how many people are on it. */
+
+// userId -> books. Survives re-renders within a session; cleared when a share
+// changes, since that's exactly when it would be wrong.
+const sharedBooksCache = new Map();
+
+async function showPeople() {
+  $('#start').hidden = true;
+  $('#people').hidden = false;
+  await renderPeople();
+  // Announce the screen, not the first row. Focus has to land somewhere, and a
+  // heading says where you are.
+  $('#people-head').focus();
+}
+
+function hidePeople() {
+  $('#people').hidden = true;
+  $('#start').hidden = false;
+}
+
+async function renderPeople() {
+  const list = $('#people-list');
+  list.innerHTML = '';
+
+  if (!isHosted()) {
+    list.innerHTML =
+      '<div class="empty">Reading together needs a backend.<br>See DEPLOY.md.</div>';
+    return;
+  }
+
+  let people;
+  try {
+    people = await store.listConnections();
+  } catch (e) {
+    list.innerHTML = `<div class="empty">${escape(e.message)}</div>`;
+    return;
+  }
+
+  if (!people.length) {
+    list.innerHTML =
+      '<div class="empty">Nobody yet.<br>Send someone an invite link and they’ll show up here.</div>';
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  for (const p of people) {
+    frag.appendChild(personCard(p));
+  }
+  list.appendChild(frag);
+}
+
+function personCard(p) {
+  const wrap = document.createElement('div');
+  wrap.className = 'person';
+
+  const booksId = `person-books-${p.userId}`;
+  const books = document.createElement('div');
+  books.className = 'person-books';
+  books.id = booksId;
+  books.hidden = true;
+
+  const meta = p.status === 'pending'
+    ? 'Invite not accepted yet'
+    : p.bookCount === 0
+      ? 'No books in common yet'
+      : p.bookCount === 1 ? '1 book together' : `${p.bookCount} books together`;
+
+  const row = personRow(p, {
+    meta,
+    controls: booksId,
+    onToggle: (btn) => toggleSharedBooks(p, btn, books),
+    action: {
+      label: 'Disconnect',
+      onClick: () => disconnectPerson(p),
+    },
+  });
+
+  wrap.append(row, books);
+  return wrap;
+}
+
+async function toggleSharedBooks(p, btn, container) {
+  const open = btn.getAttribute('aria-expanded') === 'true';
+  btn.setAttribute('aria-expanded', String(!open));
+  container.hidden = open;
+  if (open || container.dataset.loaded === 'true') return;
+
+  container.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    let books = sharedBooksCache.get(p.userId);
+    if (!books) {
+      books = await store.listSharedBooks(p.userId);
+      sharedBooksCache.set(p.userId, books);
+    }
+    container.innerHTML = '';
+    if (!books.length) {
+      container.innerHTML =
+        '<div class="empty">No books in common yet.<br>Open one and use Invite to share it.</div>';
+    } else {
+      const frag = document.createDocumentFragment();
+      for (const d of books) {
+        frag.appendChild(bookCard(d, {
+          onOpen: () => {
+            hidePeople();
+            openDoc(d.id, d);
+          },
+        }));
+      }
+      container.appendChild(frag);
+    }
+    container.dataset.loaded = 'true';
+  } catch (e) {
+    container.innerHTML = `<div class="empty">${escape(e.message)}</div>`;
+  }
+}
+
+async function disconnectPerson(p) {
+  if (!confirm(
+    `Disconnect from ${p.name}? Books you've already shared stay shared — ` +
+    `remove those from each book's reader list.`
+  )) return;
+  try {
+    await store.disconnect(p.userId);
+    sharedBooksCache.delete(p.userId);
+    await renderPeople();
+    toast(`Disconnected from ${p.name}.`);
+  } catch (e) {
+    toast(e.message);
   }
 }
 
@@ -601,7 +1061,11 @@ async function openDoc(id, doc = {}) {
     $('#start').hidden = false;
     return;
   }
-  $('#t-invite').hidden = !isHosted();
+  // Shown in both modes now: it opens the reader list, which local mode can answer
+  // (the ?me= tabs are real members). Only the copy-a-link button inside needs a server,
+  // and it disables itself with a reason.
+  $('#t-invite').hidden = false;
+  $('#people').hidden = true;
 
   await store.saveMember(id, { userId: me.id, name: me.name, color: me.color });
   [annotations, members, progress] = await Promise.all([
@@ -718,8 +1182,18 @@ function onRemoteChange(change) {
   }
   if (change.kind === 'member') {
     const i = members.findIndex((m) => m.userId === change.row.userId);
-    if (i >= 0) members[i] = change.row;
-    else members.push(change.row);
+    // A hard delete is a removal; a revoke is a state change that keeps the row, because
+    // a reader who left their marks behind still needs a name beside them.
+    if (change.row.removed) {
+      if (i >= 0) members.splice(i, 1);
+      delete progress[change.row.userId];
+    } else {
+      if (i >= 0) members[i] = change.row;
+      else members.push(change.row);
+      // Their place on the rail goes with their access. The membership row survives a
+      // revoke; their position on it should not.
+      if (change.row.revokedAt) delete progress[change.row.userId];
+    }
     renderAnnotations();
     renderPanel();
     renderSpine();
@@ -834,15 +1308,22 @@ function bindTools() {
     $('#t-panel').title = open ? 'Show the margin' : 'Hide the margin';
   };
 
+  // One other reader is still one click — the button goes straight there, as it always
+  // did. More than one and there's a question to answer first, so it opens a picker.
+  // The document-level pointerdown handler closes any open popover, and `click` fires
+  // after `pointerup`, so opening one from here needs no guard against its own dismissal.
   $('#t-jump').onclick = () => {
-    const o = other();
-    const p = o && progress[o.userId];
-    if (!p) return toast('Nobody else has opened this book yet.');
-    reader?.goTo(p, true);
+    const rows = readerPositions();
+    if (!rows.length) return toast('Nobody else has opened this book yet.');
+    if (rows.length === 1) return reader?.goTo(rows[0], true);
+    const r = $('#t-jump').getBoundingClientRect();
+    openReadersPopover(rows, r.left + r.width / 2, r.bottom);
   };
 
   $('#t-who').onclick = openWhoDialog;
-  $('#t-invite').onclick = copyInvite;
+  // The button opens the reader list; copying a link is one action inside it. Sharing
+  // stopped being "send a link" the moment a book could hold more than two people.
+  $('#t-invite').onclick = openShareDialog;
   // Dismissing is per-open, not remembered: reopening a scan is exactly when you'd
   // want reminding, and the greyed-out Select is the standing reminder in between.
   $('#notice-ok').onclick = hideNotice;
@@ -973,12 +1454,19 @@ function openPopover(sel, x, y) {
 }
 
 /** Open the popover at (x, y) in viewport pixels, kept inside the window. */
-function placePopover(x, y) {
+/**
+ * `below` flips the popover under the anchor instead of above it. Selection popovers
+ * sit above the text they belong to; a popover hanging off the topbar has nothing above
+ * it but the window edge.
+ */
+function placePopover(x, y, { below = false } = {}) {
   const pop = $('#pop');
   pop.dataset.open = 'true';
   const r = pop.getBoundingClientRect();
   pop.style.left = Math.min(Math.max(8, x - r.width / 2), innerWidth - r.width - 8) + 'px';
-  pop.style.top = Math.max(8, y - r.height - 12) + 'px';
+  pop.style.top = below
+    ? Math.min(y + 10, innerHeight - r.height - 8) + 'px'
+    : Math.max(8, y - r.height - 12) + 'px';
 }
 
 function closePopover() {
@@ -1185,71 +1673,119 @@ function renderSpine() {
     track.appendChild(t);
   }
 
-  const rows = Object.values(progress);
-  for (const p of rows) {
+  const mine = progress[me.id];
+  const theirs = readerPositions();
+
+  // Your own marker is a pill that sizes to its label, so the label can be as long
+  // as it needs to be — "p.5", "p.147" and "100%" all fit, which a fixed-diameter
+  // circle could not.
+  if (mine) {
     const m = document.createElement('button');
-    const isMe = p.userId === me.id;
-    m.className = 'marker' + (isMe ? '' : ' them');
-    m.style.top = (p.percent ?? 0) * 100 + '%';
-    m.style.background = colorOf(p.userId);
-    // Your own marker is a pill that sizes to its label, so the label can be as long
-    // as it needs to be — "p.5", "p.147" and "100%" all fit, which a fixed-diameter
-    // circle could not. Theirs is a bare dot in its own lane: two labels on one rail
-    // collide exactly when you're reading the same part of the book.
-    m.textContent = isMe ? posLabel(p) : '';
-    const where = `${nameOf(p.userId)} — ${posLabel(p)}`;
-    m.title = isMe ? where : `${where}. Jump to them.`;
-    // The dot has no text at all, and the pill's text is an abbreviation ("p.5"), so
-    // neither is a usable accessible name on its own.
-    m.setAttribute('aria-label', isMe
-      ? `You are at ${spokenPos(p)}`
-      : `${nameOf(p.userId)} is at ${spokenPos(p)}. Jump to them.`);
-    m.onclick = () => reader.goTo(p, true);
+    m.className = 'marker';
+    m.style.top = (mine.percent ?? 0) * 100 + '%';
+    m.style.background = colorOf(me.id);
+    m.textContent = posLabel(mine);
+    m.title = `${nameOf(me.id)} — ${posLabel(mine)}`;
+    // The pill's text is an abbreviation ("p.5"), which is not a usable accessible
+    // name on its own.
+    m.setAttribute('aria-label', `You are at ${spokenPos(mine)}`);
+    m.onclick = () => reader.goTo(mine, true);
     track.appendChild(m);
   }
 
-  // The gap is the point of the whole rail: how far apart the two of you are,
-  // in the only unit that matters here.
-  const o = other();
-  const mine = progress[me.id];
-  const theirs = o && progress[o.userId];
+  // Theirs are bare dots in a lane of their own: two labels on one rail collide
+  // exactly when you're reading the same part of the book. Readers who land within a
+  // dot's height of each other are drawn as one marker carrying a count — overlapping
+  // dots are unreadable precisely where the rail is most worth looking at, and "3
+  // readers here" is the better answer anyway. With one other reader nothing clusters,
+  // so this is the same single dot it has always been.
+  for (const c of clusterPositions(theirs, track.clientHeight)) {
+    const m = document.createElement('button');
+    m.className = 'marker them' + (c.readers.length > 1 ? ' cluster' : '');
+    m.style.top = c.percent * 100 + '%';
+
+    if (c.readers.length === 1) {
+      const p = c.readers[0];
+      m.style.background = colorOf(p.userId);
+      const where = `${nameOf(p.userId)} — ${posLabel(p)}`;
+      m.title = `${where}. Jump to them.`;
+      m.setAttribute('aria-label', `${nameOf(p.userId)} is at ${spokenPos(p)}. Jump to them.`);
+      m.onclick = () => reader.goTo(p, true);
+    } else {
+      // Neutral, not one reader's color: picking any of them would be a lie about
+      // whose position this is. --muted rather than --edge because the count sits on
+      // top of it at 9px — --ink on --muted is 8.3:1, on --edge only 4.0:1.
+      m.style.background = 'var(--muted)';
+      m.textContent = String(c.readers.length);
+      const names = c.readers.map((p) => nameOf(p.userId)).join(', ');
+      m.title = `${names} — around ${posLabel(c.readers[0])}. Pick one to jump to.`;
+      m.setAttribute('aria-label',
+        `${c.readers.length} readers near ${spokenPos(c.readers[0])}: ${names}. Pick one to jump to.`);
+      m.onclick = () => {
+        const r = m.getBoundingClientRect();
+        openReadersPopover(c.readers, r.left + r.width / 2, r.bottom);
+      };
+    }
+    track.appendChild(m);
+  }
+
+  /* The gap is the point of the whole rail: how far apart you are, in the only unit
+     that matters here. With more than two readers the meaningful distance is the
+     spread of the group — from whoever is furthest behind to whoever is furthest
+     ahead — which for exactly two people is the distance between you, unchanged. */
   const gap = $('#gap');
   const between = $('#between');
   const jump = $('#jump-label');
-  const together = !!(mine && theirs &&
-    (mine.page != null ? mine.page === theirs.page : mine.cfi === theirs.cfi));
-  // The label only needs to know where they are. The gap needs both of you.
-  jump.textContent = theirs
-    ? together ? 'Together' : `${nameOf(o.userId)} · ${posLabel(theirs)}`
-    : 'Find them';
-  $('#t-jump').setAttribute('aria-label', theirs
-    ? together
-      ? `You are both at ${spokenPos(theirs)}`
-      : `Jump to ${nameOf(o.userId)}, at ${spokenPos(theirs)}`
-    : 'Find the other reader');
 
-  if (mine && theirs) {
-    const usingPages = mine.page != null && theirs.page != null;
-    const d = usingPages
-      ? Math.abs(mine.page - theirs.page)
-      : Math.abs((mine.percent ?? 0) - (theirs.percent ?? 0));
-    const a = mine.percent ?? 0;
-    const b = theirs.percent ?? 0;
-    const span = Math.abs(a - b);
+  const everyone = mine ? [mine, ...theirs] : theirs;
+  const together = !!(mine && theirs.length && theirs.every((p) =>
+    mine.page != null ? mine.page === p.page : mine.cfi === p.cfi));
 
-    // Paint the stretch of book between you. The number says how far apart; the
-    // painted span says *where* that distance is, which is the thing a rail can
-    // show and a label can't.
+  // The label only needs to know where they are. The band needs the extremes.
+  jump.textContent = !theirs.length
+    ? 'Find them'
+    : together
+      ? 'Together'
+      : theirs.length === 1
+        ? `${nameOf(theirs[0].userId)} · ${posLabel(theirs[0])}`
+        : `${theirs.length} readers`;
+  $('#t-jump').setAttribute('aria-label', !theirs.length
+    ? 'Find the other reader'
+    : together
+      ? `You are all at ${spokenPos(theirs[0])}`
+      : theirs.length === 1
+        ? `Jump to ${nameOf(theirs[0].userId)}, at ${spokenPos(theirs[0])}`
+        : `Jump to one of ${theirs.length} readers`);
+
+  if (mine && theirs.length) {
+    // Sorted by position, so first and last are the two ends of the group. At two
+    // readers these are just the two of you.
+    const ends = [...everyone].sort((x, y) => (x.percent ?? 0) - (y.percent ?? 0));
+    const top = ends[0];
+    const bot = ends[ends.length - 1];
+    const a = top.percent ?? 0;
+    const b = bot.percent ?? 0;
+    const span = b - a;
+
+    const usingPages = top.page != null && bot.page != null;
+    const d = usingPages ? Math.abs(bot.page - top.page) : span;
+
+    // Paint the stretch of book the group is spread across. The number says how far
+    // apart; the painted span says *where* that distance is, which is the thing a rail
+    // can show and a label can't.
     between.hidden = span < 0.005;
-    between.style.top = Math.min(a, b) * 100 + '%';
+    between.style.top = a * 100 + '%';
     between.style.height = span * 100 + '%';
+    // Always 180deg now — the band is drawn top-down from the topmost reader, so the
+    // gradient runs in the order the readers actually sit. The old code flipped
+    // between 0 and 180 to keep "me" as the first stop; sorting does that job.
     between.style.background =
-      `linear-gradient(${a <= b ? 180 : 0}deg, ${colorOf(me.id)}, ${colorOf(o.userId)})`;
+      `linear-gradient(180deg, ${colorOf(top.userId)}, ${colorOf(bot.userId)})`;
 
-    // The label sits at the midpoint, which is where your own pill sits when the two
-    // of you are close — so below a tenth of the book it's dropped rather than drawn
-    // underneath the pill. Nothing is lost: at that distance the topbar already says
-    // "Together", and the painted span still shows it.
+    // The label sits at the midpoint, which is where your own pill sits when everyone
+    // is close — so below a tenth of the book it's dropped rather than drawn underneath
+    // the pill. Nothing is lost: at that distance the topbar already says "Together",
+    // and the painted span still shows it.
     gap.textContent = span < 0.1
       ? ''
       : d === 0 ? 'together' : usingPages ? `${d}p` : `${Math.round(d * 100)}%`;
@@ -1259,6 +1795,66 @@ function renderSpine() {
     gap.textContent = '';
     between.hidden = true;
   }
+}
+
+/**
+ * Where everyone but you is, most-recently-known first sorted by position. Excludes
+ * readers whose access was revoked: the membership row survives so their old
+ * highlights keep a name, but a position on the rail would say they are still here.
+ */
+function readerPositions() {
+  const gone = revokedIds();
+  return Object.values(progress)
+    .filter((p) => p.userId !== me.id && !gone.has(p.userId))
+    .sort((a, b) => (a.percent ?? 0) - (b.percent ?? 0));
+}
+
+/**
+ * Group readers who would draw on top of each other. The threshold is a dot's height
+ * expressed as a fraction of the rail, so it stays correct as the window resizes
+ * rather than being a guessed constant.
+ *
+ * Fewer than two readers can't collide, so the single-reader case returns untouched —
+ * that is what keeps a two-person book drawing exactly the marker it always did.
+ */
+function clusterPositions(rows, trackHeight) {
+  if (rows.length < 2) return rows.map((p) => ({ percent: p.percent ?? 0, readers: [p] }));
+  const threshold = trackHeight > 0 ? 16 / trackHeight : 0.03;
+  const out = [];
+  for (const p of rows) {
+    const pct = p.percent ?? 0;
+    const last = out[out.length - 1];
+    // Anchored to the first member, not re-centred as the cluster grows: a marker that
+    // drifts while you read is harder to track than one that stays put.
+    if (last && pct - last.percent <= threshold) last.readers.push(p);
+    else out.push({ percent: pct, readers: [p] });
+  }
+  return out;
+}
+
+/** The picker behind a cluster dot and behind "Find them" when several people are in. */
+function openReadersPopover(rows, x, y) {
+  const pop = $('#pop');
+  pop.innerHTML = '';
+  pop.dataset.kind = 'readers';
+  for (const p of rows) {
+    const b = document.createElement('button');
+    b.className = 'act';
+    b.appendChild(avatarEl({ name: nameOf(p.userId), color: colorOf(p.userId) }, 18));
+    const name = document.createElement('span');
+    name.textContent = nameOf(p.userId);
+    const pos = document.createElement('span');
+    pos.className = 'who-pos';
+    pos.textContent = posLabel(p);
+    b.append(name, pos);
+    b.setAttribute('aria-label', `Jump to ${nameOf(p.userId)}, at ${spokenPos(p)}`);
+    b.onclick = () => {
+      closePopover();
+      reader?.goTo(p, true);
+    };
+    pop.appendChild(b);
+  }
+  placePopover(x, y, { below: true });
 }
 
 /* ------------------------------------------------------------------ dialogs */
@@ -1295,17 +1891,307 @@ function bindNoteDialog() {
   });
 }
 
+/* ------------------------------------------------------------- share sheet
+   One dialog with two views. The list is the normal case; removing someone
+   needs a question answered rather than acknowledged, and a native confirm()
+   can't ask it. Swapping views inside one dialog beats stacking a second one:
+   two modals means two backdrops and a focus ring that ends up in the wrong
+   place when the top one closes. */
+
+// The person the revoke view is asking about, held between the two views.
+let revoking = null;
+
+async function openShareDialog() {
+  if (!docId) return;
+  const dlg = $('#share-dlg');
+  dlg.dataset.view = 'list';
+  $('#revoke-go').hidden = true;
+  $('#share-invite').hidden = false;
+  // Its enabled state depends on who owns the book, which renderShareList works out.
+  await renderShareList();
+  dlg.showModal();
+}
+
+async function renderShareList() {
+  const list = $('#share-list');
+  list.innerHTML = '';
+
+  let shares = [];
+  try {
+    shares = await store.listShares(docId);
+  } catch (e) {
+    list.innerHTML = `<div class="empty">${escape(e.message)}</div>`;
+    return;
+  }
+
+  const owner = shares.find((s) => s.isOwner);
+  const iAmOwner = owner?.userId === me.id;
+  $('#share-lede').textContent = iAmOwner
+    ? 'Everyone here sees each other’s highlights and where you all are.'
+    : `${owner ? owner.name : 'Whoever added this book'} shares it with you. ` +
+      'Only they can add or remove other readers.';
+
+  // Adding a reader is owner-only, by link as much as by name — the invites policy and
+  // share_document both enforce it, so the button has to say so rather than fail. Two
+  // different reasons, two different sentences: "no backend" and "not your book" are not
+  // the same rule and shouldn't wear the same tooltip.
+  const invite = $('#share-invite');
+  invite.disabled = !isHosted() || !iAmOwner;
+  invite.title = !isHosted()
+    ? 'Invite links need a backend. See DEPLOY.md.'
+    : !iAmOwner
+      ? `Only ${owner ? owner.name : 'the person who added this book'} can invite readers.`
+      : 'Copy a link that lets one person in';
+
+  const frag = document.createDocumentFragment();
+  for (const s of shares) {
+    const isMe = s.userId === me.id;
+    const meta = s.revokedAt
+      ? s.leftMarks ? 'Removed — their highlights stayed' : 'Removed — their highlights are hidden'
+      : s.isOwner ? 'Added this book' : isMe ? 'You' : 'Reading';
+
+    // You can always remove yourself. Only the owner can remove anyone else, and
+    // nobody can remove the owner — the same rules revoke_share enforces server-side,
+    // mirrored here so the button isn't offered and then refused.
+    const canRemove = isHosted() && !s.revokedAt && !s.isOwner && (isMe || iAmOwner);
+    const canRestore = isHosted() && s.revokedAt && iAmOwner;
+
+    frag.appendChild(personRow(
+      { ...s, name: isMe ? `${s.name} (you)` : s.name },
+      {
+        meta,
+        action: canRemove
+          ? { label: isMe ? 'Leave' : 'Remove', onClick: () => askRevoke(s, isMe) }
+          : canRestore
+            ? { label: 'Add back', onClick: () => restoreShare(s) }
+            : null,
+      }
+    ));
+  }
+  list.appendChild(frag);
+
+  await renderShareAdd(shares, iAmOwner);
+}
+
+async function renderShareAdd(shares, iAmOwner) {
+  const wrap = $('#share-add-wrap');
+  const box = $('#share-add');
+  box.innerHTML = '';
+  // Only the owner can grant, and only in hosted mode. Hiding rather than disabling
+  // here: this is a whole section that has nothing to say, not a control with a rule.
+  if (!isHosted() || !iAmOwner) {
+    wrap.hidden = true;
+    return;
+  }
+
+  let people = [];
+  try {
+    people = await store.listConnections();
+  } catch {
+    wrap.hidden = true;
+    return;
+  }
+
+  const active = new Set(shares.filter((s) => !s.revokedAt).map((s) => s.userId));
+  const candidates = people.filter((p) => p.status === 'accepted' && !active.has(p.userId));
+  if (!candidates.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+
+  const frag = document.createDocumentFragment();
+  for (const p of candidates) {
+    const id = `share-with-${p.userId}`;
+    const row = document.createElement('div');
+    row.className = 'share-add';
+
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.id = id;
+    check.onchange = async () => {
+      // Disabled for the round trip: a second click would be a second grant, and the
+      // list re-renders underneath it either way.
+      check.disabled = true;
+      try {
+        await store.shareDocument(docId, p.userId);
+        sharedBooksCache.delete(p.userId);
+
+        // They may already own a copy of this exact file. Only they can merge the two —
+        // you can't name a document you're not in, and the merge always gives up the
+        // caller's own copy — so this is a heads-up, not an action.
+        let dupe = null;
+        try {
+          dupe = await store.findDuplicate(docId, p.userId);
+        } catch {
+          /* the share worked; the extra detail is optional */
+        }
+        toast(dupe
+          ? `Shared with ${p.name}. They already have this file — they'll be offered the merge.`
+          : `Shared with ${p.name}.`);
+
+        await refreshMembers();
+        await renderShareList();
+      } catch (e) {
+        check.checked = false;
+        check.disabled = false;
+        toast(e.message);
+      }
+    };
+
+    const label = document.createElement('label');
+    label.htmlFor = id;
+    label.appendChild(avatarEl(p, 24));
+    const name = document.createElement('span');
+    name.textContent = p.name;
+    label.appendChild(name);
+
+    row.append(check, label);
+    frag.appendChild(row);
+  }
+  box.appendChild(frag);
+}
+
+function askRevoke(person, isMe) {
+  revoking = { person, isMe };
+  const dlg = $('#share-dlg');
+  dlg.dataset.view = 'revoke';
+  $('#revoke-head').textContent = isMe ? 'Leave this book' : `Remove ${person.name}`;
+  $('#revoke-legend').textContent = isMe
+    ? 'The book goes off your shelf. What happens to the highlights you made in it?'
+    : `${person.name} loses access to this book. What happens to the highlights they made?`;
+  // The radio wording is written for the third person, which is wrong when it's you.
+  const labels = dlg.querySelectorAll('.choice .t');
+  labels[0].textContent = isMe ? 'Leave my highlights' : 'Leave their highlights';
+  labels[1].textContent = isMe ? 'Take my highlights with me' : 'Take their highlights with them';
+  dlg.querySelector('input[name="leave-marks"][value="keep"]').checked = true;
+  $('#share-invite').hidden = true;
+  const go = $('#revoke-go');
+  go.hidden = false;
+  go.textContent = isMe ? 'Leave' : 'Remove';
+  go.focus();
+}
+
+async function doRevoke() {
+  if (!revoking) return;
+  const { person, isMe } = revoking;
+  const leaveMarks =
+    $('#share-dlg').querySelector('input[name="leave-marks"]:checked')?.value !== 'take';
+  try {
+    if (isMe) {
+      await store.leaveDocument(docId, { leaveMarks });
+      $('#share-dlg').close();
+      await closeDoc();
+      await renderShelf();
+      toast('You left the book.');
+    } else {
+      await store.revokeShare(docId, person.userId, { leaveMarks });
+      sharedBooksCache.delete(person.userId);
+      $('#share-dlg').dataset.view = 'list';
+      $('#revoke-go').hidden = true;
+      $('#share-invite').hidden = false;
+      await refreshMembers();
+      await renderShareList();
+      toast(`${person.name} was removed.`);
+    }
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    revoking = null;
+  }
+}
+
+async function restoreShare(person) {
+  try {
+    await store.shareDocument(docId, person.userId);
+    sharedBooksCache.delete(person.userId);
+    await refreshMembers();
+    await renderShareList();
+    toast(`${person.name} is back in.`);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+/** Re-read the member list into module state so names, colors and the rail agree. */
+async function refreshMembers() {
+  if (!docId) return;
+  try {
+    members = await store.listMembers(docId);
+    renderPanel();
+    renderSpine();
+  } catch {
+    /* the rail keeps the members it had; a stale color beats a blank one */
+  }
+}
+
+function bindPeople() {
+  $('#t-people').onclick = showPeople;
+  $('#people-back').onclick = hidePeople;
+  $('#people-invite').onclick = copyConnectInvite;
+
+  // The people screen is a screen, not a dialog, so it has no built-in dismissal.
+  // Escape is what everyone tries first.
+  $('#people').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hidePeople();
+  });
+
+  // Someone connected, or shared a book with you, while you were sitting on the shelf.
+  // This is the only reason the per-user channel exists.
+  if (isHosted()) {
+    store.subscribeUser((change) => {
+      if (change.kind === 'connection') {
+        sharedBooksCache.clear();
+        if (!$('#people').hidden) renderPeople();
+        return;
+      }
+      if (change.kind === 'share') {
+        sharedBooksCache.clear();
+        // A book arriving or leaving changes the shelf, which may be what's on screen.
+        if (!$('#start').hidden) renderShelf();
+        if (!$('#people').hidden) renderPeople();
+      }
+    });
+  }
+}
+
+function bindShareDialog() {
+  $('#share-invite').onclick = copyInvite;
+  $('#revoke-go').onclick = doRevoke;
+  // Escape closes the dialog outright, including from the revoke view. Reset the view
+  // so the next open doesn't land mid-question.
+  $('#share-dlg').addEventListener('close', () => {
+    $('#share-dlg').dataset.view = 'list';
+    revoking = null;
+  });
+}
+
 function openWhoDialog() {
   $('#who-name').value = me.name;
   const wrap = $('#who-palette');
   wrap.innerHTML = '';
   let picked = me.color;
+
+  /* Colors taken by the other readers of the open book. Two readers in one book sharing
+     a color makes every highlight ambiguous, which the two-reader default palette made
+     impossible by accident and a third reader makes possible on purpose. The server
+     resolves this when someone joins (pick_color in social.sql); this is the other half,
+     for someone changing their mind afterwards.
+
+     Disabled with a name in the tooltip, not hidden: a palette that silently loses
+     swatches as people join reads as a bug. */
+  const taken = new Map(others().map((m) => [m.color, m.name]));
+
   for (const c of COLORS) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'swatch';
     b.style.background = c.hex;
     b.style.color = c.hex;
+    const owner = c.hex === me.color ? null : taken.get(c.hex);
+    b.disabled = !!owner;
+    b.title = owner ? `${owner} is using this one` : c.name;
+    b.setAttribute('aria-label', owner ? `${c.name} — taken by ${owner}` : c.name);
     b.ariaPressed = String(c.hex === picked);
     b.onclick = () => {
       picked = c.hex;
@@ -1334,6 +2220,14 @@ function bindWhoDialog() {
     me.color = dlg._pick();
     setPref(uidKey + ':name', me.name);
     setPref(uidKey + ':color', me.color);
+    // The profile is what everyone else reads you by, and the only copy that follows you
+    // to another device. It also renames you on every book at once, which is why the
+    // local prefs above are now a cache rather than the record.
+    try {
+      await store.saveProfile({ name: me.name, color: me.color });
+    } catch (err) {
+      toast(err.message);
+    }
     $('#t-who').textContent = me.name;
     if (docId) {
       await store.saveMember(docId, { userId: me.id, name: me.name, color: me.color });
@@ -1352,4 +2246,8 @@ function escape(s) {
   );
 }
 
-boot();
+boot().catch((err) => {
+  console.error('Marginalia: boot failed', err);
+  $('#boot').dataset.failed = 'true';
+  $('#boot-err').hidden = false;
+});

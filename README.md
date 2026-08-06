@@ -1,10 +1,14 @@
 # Marginalia
 
-A PDF and EPUB reader for exactly two people who aren't in the same room.
+A PDF and EPUB reader for people who aren't in the same room, reading together.
 
 Each of you keeps your own place. Each of you has a color. Highlights and typed notes
-show up in both copies — stylus ink too, on PDFs. A rail down the left edge shows the
-whole book with both of you on it and how far apart you are.
+show up in everyone's copy — stylus ink too, on PDFs. A rail down the left edge shows the
+whole book with every reader on it and how far apart you all are.
+
+A book starts with just you. Whoever adds it owns it, and only they decide who else can
+read along — everyone else can leave, but only the owner can invite or remove. See
+"Reading with other people" below for how sharing and connections actually work.
 
 
 ## Two modes
@@ -47,25 +51,30 @@ python3 -m http.server 8000
 Drop in a DRM-free PDF or EPUB. Everything lives in IndexedDB on your machine until you
 connect a backend.
 
-#### Be two people
+#### Be several people
 
-Identity comes from a `?me=` parameter, so two tabs are two readers:
+Identity comes from a `?me=` parameter, so each tab is its own reader:
 
 - `http://localhost:8000/?me=ash`
 - `http://localhost:8000/?me=robin`
+- `http://localhost:8000/?me=jules`
 
-Open the same book in both. Highlight in one and watch it land in the other. A
-`BroadcastChannel` stands in for the realtime socket, so the two-person flow is real
-before the backend exists — same code path, different transport.
+Open the same book in all of them. Highlight in one and watch it land in the rest. A
+`BroadcastChannel` stands in for the realtime socket, so the multi-reader flow is real
+before the backend exists — same code path, different transport. Local mode has no
+concept of invites or connections (there's only ever one browser), so every `?me=` tab
+just joins the book directly — the People screen and share sheet are inert here, with a
+"needs a backend" message where they'd otherwise do something.
 
 **`?me=` is local-mode only.** In hosted mode identity comes from the signed-in session,
 and the parameter is ignored (with a console warning) — a silently-ignored `?me=` looks
-exactly like a broken sign-in. If you're on a deployed URL and want the two-tab flow, add
+exactly like a broken sign-in. If you're on a deployed URL and want the multi-tab flow, add
 `?backend=local`.
 
 ### Hosted (default on any deployed URL)
-The same code talks to Postgres — sign-in, real sync between two devices, invite links.
-Fill in `src/config.js` and see `DEPLOY.md`. Live version at
+The same code talks to Postgres — sign-in, real sync across devices, invite links,
+sharing a book with more than one other person. Fill in `src/config.js` and see
+`DEPLOY.md`. Live version at
 [tboggia.github.io/marginalia](https://tboggia.github.io/marginalia/).
 
 To exercise it from your laptop before pushing, open
@@ -74,13 +83,54 @@ if `http://localhost:8000` is listed under Supabase's Authentication → URL Con
 Redirect URLs.
 
 
+## Reading with other people
+
+Hosted mode only — this whole section is inert in local mode, since there's only ever
+one browser and no accounts to connect.
+
+Two ideas, kept separate on purpose: a **connection** links two accounts and shares no
+book; a **grant** shares one specific book with someone you're already connected to.
+Connecting alone gets you nothing to read — it's the handshake that makes grants
+possible, and it's why removing someone from a book doesn't have to mean disconnecting
+from them entirely, or the other way round.
+
+**People** (the button beside "Add a book") is where connections live. Send an invite
+link from there and whoever opens it is connected to you — no book attached. Each
+person's row shows how many books you actually hold in common; open it to see which
+ones.
+
+**Invite**, inside a book, shares that specific book. It's owner-only: whoever added the
+book is the only one who can add or remove other readers. Everyone else can leave, but
+can't invite anyone else in, and can't remove another reader — the share sheet (the same
+Invite button) shows you which one you are. If the person you're inviting is already
+connected to you, you can add them straight from the share sheet with no link at all.
+
+**Leaving a book** — by choice, or removed by the owner — asks one question: do your
+highlights stay? *Leave them* keeps your marks visible to everyone still reading, though
+you stop seeing anyone else's and they stop seeing yours. *Take them* hides them from
+everyone else, reversibly — nothing is deleted, and sharing the book with you again
+brings every one of them straight back, along with your old reading position.
+
+**The same book, twice.** If you add a book someone else has already added, and the two
+files are byte-identical, you'll be offered a merge on your shelf — your copy folds into
+theirs, every highlight either of you made lands exactly where it already was, because
+the bytes are the same. Two different scans of the same title are never merged; the app
+says so rather than silently putting your highlights on the wrong words. See "Backend
+architecture" below for why identical bytes is the whole safety argument.
+
+**Invite links expire.** Two weeks, one use, by default — there's no cap on how many
+readers a book can hold anymore, so unlike the old two-reader design, a spent link isn't
+automatically harmless. If one leaks before it's used, the share sheet can mint another;
+the old one just stops working.
+
+
 ## Controls
 
 | | |
 |---|---|
 | `V` | Select — drag over text, pick a color, or add a note |
 | Click a highlight | Opens it — read or edit the note, or **Remove highlight** |
-| `×` in the margin | Removes that highlight. Your own only, and it removes it for both of you |
+| `×` in the margin | Removes that highlight. Your own only, and it removes it for everyone reading |
 | `D` | Draw — for a mouse or trackpad. PDF only, see below |
 | `E` | Erase — your own ink only. PDF only, see below |
 | A stylus | Always draws, in any mode. You didn't pick it up to scroll. |
@@ -91,23 +141,31 @@ Redirect URLs.
 **Working, and tested in a real browser:** rendering, virtualized scroll (a 900-page book
 keeps ~5 canvases alive), per-reader progress with restore, text selection → highlights,
 notes, stylus ink with pressure, erase, per-reader color, the spine, and live sync between
-two readers.
+two readers via `BroadcastChannel` in local mode.
 
 **Written, and structurally verified, but never run against a live project:** the
-Supabase backend. `schema.sql` parses against PostgreSQL's own grammar and the app
-boots cleanly in hosted mode (auth gate, adapter load, invite handling all exercised
-against a fake project). But no query has ever hit a real database. Assume an
-afternoon of small breakage, and check the RLS by hand — see `DEPLOY.md`.
+Supabase backend, `schema.sql` and `social.sql` both. Every statement parses against
+PostgreSQL's own grammar and the app boots cleanly in hosted mode (auth gate, adapter
+load, invite handling all exercised against a fake project), and the group-spread rail
+math (the part that draws the gap between more than two readers) is checked against the
+old two-person code across 200,000 randomized cases and is exactly equivalent at N=2. But
+no query in either file has hit a real database, and nobody has watched three real
+accounts share a book at once. Assume an afternoon of small breakage on first run — check
+the RLS by hand and run through the checklist in `DEPLOY.md` before trusting it with a
+real book.
 
 **Known gaps:** scanned PDFs with no text layer can be inked but not highlighted — see
 "Books with no text layer" below for what the reader does about it. Highlights stop at the page edge (PDF) or
 the chapter edge (EPUB). No undo beyond deleting. **No ink on EPUB, by design, not an
-oversight:** ink's whole value is that both of you see a stroke in exactly the same
-place, which is mechanical and free on a fixed PDF page (you're both looking at the same
+oversight:** ink's whole value is that every reader sees a stroke in exactly the same
+place, which is mechanical and free on a fixed PDF page (you're all looking at the same
 bitmap) and isn't well-defined on reflowable text — there's no shared notion of "the same
-place" once font size or window width can differ between two readers. No mainstream EPUB
+place" once font size or window width can differ between readers. No mainstream EPUB
 reader (Kindle, Apple Books, Play Books) offers freehand ink on reflowable books either.
-Highlights and notes work fully on EPUB; only stylus ink is PDF-only.
+Highlights and notes work fully on EPUB; only stylus ink is PDF-only. Highlight anchors
+(PDF rects, PDF text-item indexes, EPUB CFIs) are properties of one specific file, so they
+never transfer between two different scans of the same book — see "The same book, twice"
+above for the one case that's safe (byte-identical files) and what happens otherwise.
 
 ## Books with no text layer
 
@@ -134,17 +192,26 @@ which is how a page ends up looking texty to a counter and selecting like a phot
 
 ## Backend architecture
 
-Hosted mode is four Postgres tables, RLS, one storage bucket, and two security-definer
-functions. This section is the "why"; `schema.sql` is the "what," and `DEPLOY.md` is the
-"how do I stand one up."
+Hosted mode is Postgres tables, RLS, one storage bucket, and a set of security-definer
+functions — `schema.sql` for the reader itself, `social.sql` for connections, sharing,
+and merging duplicates. This section is the "why"; those two files are the "what," and
+`DEPLOY.md` is the "how do I stand one up." Run `schema.sql` first, then `social.sql`.
 
 ### Data model
 
 ```
-documents    (id, title, storage_path, sha256, format, epub_locations, invite_code, created_by)
-memberships  (document_id, user_id, display_name, color)          — PK(document_id, user_id)
+-- schema.sql
+documents    (id, title, storage_path, sha256, format, epub_locations, created_by)
+memberships  (document_id, user_id, display_name, color,
+              shared_by, revoked_at, left_marks)                  — PK(document_id, user_id)
 progress     (document_id, user_id, page, y_frac, cfi, percent)   — PK(document_id, user_id)
-annotations  (id, document_id, user_id, type, color, rects, strokes, text, cfi, note, deleted_at)
+annotations  (id, document_id, user_id, type, color, rects, strokes, text, cfi, note,
+              deleted_at, hidden_at)
+
+-- social.sql
+profiles     (user_id, display_name, color)                       — PK(user_id)
+connections  (user_a, user_b, requested_by, status)                — PK(user_a, user_b), user_a < user_b
+invites      (code, created_by, kind, document_id, max_uses, uses, expires_at, revoked_at)
 ```
 
 - **One `annotations` table, not three.** Highlights and ink are one row shape with nullable
@@ -155,14 +222,29 @@ annotations  (id, document_id, user_id, type, color, rects, strokes, text, cfi, 
   `y_frac`; EPUB has no fixed page, so it locates with a `cfi` instead. The
   `progress_locator_matches` constraint enforces "exactly one of the two," so a row can never
   claim both.
-- **`sha256` on `documents`.** If someone re-uploads a different scan of the same title, every
-  stored anchor (rects, text_anchor, cfi) now points at the wrong words. The hash lets the app
-  compare on load and refuse, rather than silently render 400 highlights in the wrong place.
+- **`sha256` on `documents`.** Two different scans of the same title get two rows on purpose —
+  every stored anchor (rects, text_anchor, cfi) is a property of one specific file, so merging
+  across a hash mismatch would silently render highlights in the wrong place. `merge_documents`
+  (in `social.sql`) re-checks the hash itself before touching a row, rather than trusting a
+  client that already claimed a match.
 - **`epub_locations` caches `book.locations.save()`.** The character-index walk that backs
   `percentageFromCfi`/`cfiFromPercentage` is a full-book pass — caching it means paying that
   cost once per book, not once per open.
 - **Soft delete (`deleted_at`), not `DELETE`.** Undo becomes a column write, and the realtime
   feed can carry a removal as an ordinary update instead of a delete event it has to special-case.
+  `hidden_at` on `annotations` is the same idea applied to a revoked reader's marks: set when
+  they leave without their marks, cleared the moment the book is shared with them again.
+- **`memberships` never loses a row.** A revoked membership keeps `revoked_at` and `left_marks`
+  instead of being deleted — that's what lets a highlight still show its author's name after
+  they've left, and what lets re-sharing the book with them pick up exactly where it stopped,
+  with no fresh invite needed.
+- **One `invites` row per link, not one code per document.** The old design put a single
+  `invite_code` on `documents`, so there was one link, forever, until it was rotated. Now every
+  invite is its own row with its own use count and expiry, and `kind` distinguishes a link that
+  connects two accounts (`connect`) from one that also grants a specific book (`book`).
+- **`connections` is stored once per pair, ordered.** `user_a < user_b` means the same two people
+  can never end up with two rows depending on who sent the invite — every query checking "are
+  these two connected" is a single lookup, not an `OR`.
 
 ### Row-level security is the entire security model
 
@@ -173,15 +255,30 @@ rules, in Postgres itself:
 - **write** → only rows where `user_id = auth.uid()`
 
 That membership check lives in one `security definer` function rather than inline in every
-policy:
+policy — and `revoked_at is null` is the one clause that makes revoking someone actually take
+their access away, rather than just hiding a button in the UI:
 
 ```sql
 create function is_member(doc uuid) returns boolean
   language sql security definer stable as $$
   select exists (select 1 from memberships m
-                 where m.document_id = doc and m.user_id = auth.uid())
+                 where m.document_id = doc and m.user_id = auth.uid()
+                   and m.revoked_at is null)
 $$;
 ```
+
+Every other policy — `read_annotations`, `read_progress`, `read_books` on storage — routes
+through this one function, so that single clause is what closes off a revoked reader's access
+to the document, its annotations, its progress, and the storage object all at once.
+
+**Deleting a book is owner-only**, not member-only. `delete_documents` used to be
+`using (is_member(id))` — any reader could destroy a shared book and cascade everyone else's
+highlights with it, which was a defensible symmetry when a book held exactly two people and
+isn't one for a group. It's now `using (created_by = auth.uid())`; anyone else leaves instead,
+which `write_own_membership` already permitted. **Sharing a book is owner-only too** —
+`share_document` and the `invites` insert policy both check `created_by`, so a reader who was
+shared into a book can't turn around and share it onward to someone else. Only the person who
+added the book decides who else reads it.
 
 It has to be `security definer` — running with the function owner's privileges, RLS suspended
 internally — because a `memberships`-select policy that itself queries `memberships` to check
@@ -216,25 +313,46 @@ render. (EPUB does the opposite on purpose — see the `DEPLOY.md` troubleshooti
 
 ### Realtime only respects RLS if you ask it to
 
-`annotations`, `progress`, and `memberships` are added to the `supabase_realtime` publication,
-and `annotations`/`progress` are set to `replica identity full`. Skip that second part and the
+`annotations`, `progress`, `memberships`, and `connections` are added to the `supabase_realtime`
+publication, and all four are set to `replica identity full`. Skip that second part and the
 realtime socket broadcasts every row change to every subscriber regardless of RLS — every policy
 above stays correctly enforced everywhere except the one channel that actually matters.
+`memberships` was in the publication from the start but didn't get `replica identity full` until
+`social.sql` — a real leak in the original schema, not just a gap this feature happened to fill:
+every subscriber's socket was receiving every membership row in the table, policy or no policy.
 
 ### Invites cross a barrier RLS creates on purpose
 
 `write_own_membership` lets you insert your own membership row, but `read_documents` means you
 can't see a document you're not already a member of — so you can never learn its `id` to insert
-against. `join_document(code, name)` is a second `security definer` function built specifically
-to cross that gap: it looks up the document by an opaque `invite_code` (never the `id`) with RLS
+against. `redeem_invite(code, name)` is a `security definer` function built specifically to
+cross that gap: it looks up the invite by an opaque `code` (never the document's `id`) with RLS
 suspended, and only *then* inserts the membership row as the calling user.
 
-Two more decisions live in that function:
+There is no reader cap anymore — that was the two-person design's answer to "what stops a leaked
+link from mattering forever," and it stopped being available the moment a book could hold more
+than two people. The token carries its own limits instead:
 
-- **Capped at two readers.** The cap is what makes a leaked invite link stop mattering the
-  moment the second reader joins — after that, the link opens nothing, whoever holds it.
-- **`rotate_invite` replaces the code without touching `memberships`.** Rotating kicks nobody
-  out; it only stops *future* joins on the old link.
+- **Every invite is single-use and expires.** `createInvite` defaults to `max_uses = 1` and a
+  two-week `expires_at`. A leaked link that's never clicked goes dead on its own; one that's
+  already been used is refused on a second attempt with a readable message, not a silent no-op.
+- **A revoked reader can't rejoin on an old link.** Revoking a membership sets `revoked_at` but
+  keeps the row — that's deliberate, it's what lets a highlight still show its author's name and
+  what lets re-sharing pick up cleanly — but it means `redeem_invite` has to check for it
+  explicitly. Without that check, a removed reader re-clicking their original invite would walk
+  straight back in through the same idempotency logic that makes a re-clicked link harmless for
+  everyone else. Getting back in requires the owner to share the book again.
+- **`revoke_invite` replaces `rotate_invite`.** The old design had one code per document, so
+  "turn off this link" meant rotating the only one there was. Every invite is now its own row,
+  so revoking one leaves every other link to the same book untouched, and kicks nobody already
+  in the book out.
+- **Only the book's owner can mint a book invite.** The `invites` table's insert policy checks
+  `documents.created_by`, matching `share_document` — a link is just another way to add a reader,
+  and adding readers is owner-only regardless of which door it comes through.
+
+`connections`, `profiles`, and `shares_a_book` exist so a book invite does one more thing a plain
+membership insert wouldn't: it also connects the two accounts, which is what makes the new
+reader show up on the owner's People screen rather than being a stranger with highlights.
 
 ### Auth: magic link, and the one setting that silently breaks it
 
@@ -273,6 +391,8 @@ DEPLOY.md               how to get it onto a URL (incl. GitHub Pages)
 .gitignore              keeps books out of a public repo — read the comment
 .nojekyll               stops GitHub Pages running Jekyll over this. Keep it empty.
 schema.sql              Postgres tables + RLS. The RLS is the security model.
+migration.sql           brings a pre-EPUB database forward to schema.sql. Run social.sql after.
+social.sql              profiles, connections, invites, sharing, revocation, duplicate merge
 src/config.js           credentials, plus the hostname-based local/hosted switch
 index.html              markup and styles
 src/geometry.js         normalize/denormalize, rect merging, stroke simplification

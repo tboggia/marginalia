@@ -7,20 +7,38 @@
  *
  * Store interface:
  *   init()                             -> {docId}
+ *   signIn(email, redirectTo)          -> void         (hosted only)
  *   putDocument(file, format, meta?)   -> {docId, title, author, format}
  *   listDocuments()                    -> [{id, title, author, cover, format, createdAt}]
  *   getDocumentSource(docId)           -> {data: ArrayBuffer} | {url: string}
- *   saveDocumentCover(docId, patch)    -> void         (optional; see below)
- *   deleteDocument(docId)              -> void         (hard: removes the book entirely)
- *   getInviteCode(docId)               -> string | null
+ *   saveDocumentCover(docId, patch)    -> void         (optional; local only)
+ *   deleteDocument(docId)              -> void         (hard, owner only)
+ *   leaveDocument(docId, opts?)        -> void         (hosted only)
  *   listAnnotations(docId)             -> Annotation[]
  *   saveAnnotation(a)                  -> Annotation   (upsert, sets updatedAt)
  *   deleteAnnotation(id)               -> void         (soft: sets deletedAt)
  *   getProgress(docId)                 -> {userId: {page, yFrac, updatedAt}}
  *   saveProgress(docId, userId, p)     -> void
- *   listMembers(docId)                 -> Member[]
+ *   listMembers(docId)                 -> Member[]     (includes revoked; see revokedAt)
  *   saveMember(docId, m)               -> void
  *   subscribe(docId, cb)               -> unsubscribe
+ *
+ * Social — see the "social" section in LocalStore for how local mode answers these.
+ * Everything marked (hosted only) throws in local mode; app.js guards with isHosted().
+ *   getProfile()                       -> {userId, name, color}
+ *   saveProfile({name, color})         -> void
+ *   listConnections()                  -> [{userId, name, color, status, bookCount}]
+ *   listSharedBooks(userId)            -> Document[]
+ *   disconnect(userId)                 -> void         (hosted only)
+ *   createInvite({kind, docId})        -> {code}       (hosted only)
+ *   redeemInvite(code, name)           -> {kind, docId} (hosted only)
+ *   revokeInvite(code)                 -> void         (hosted only)
+ *   listShares(docId)                  -> [{userId, name, color, revokedAt, leftMarks, isOwner}]
+ *   shareDocument(docId, userId)       -> void         (hosted only)
+ *   revokeShare(docId, userId, opts?)  -> void         (hosted only)
+ *   findDuplicate(docId, userId)       -> {docId} | null
+ *   mergeDocuments(keepId, dropId)     -> void         (hosted only)
+ *   subscribeUser(cb)                  -> unsubscribe
  */
 
 const DB_NAME = 'marginalia';
@@ -91,8 +109,14 @@ export async function sha256(buf) {
  * a matter of implementing flush(), not restructuring every caller.
  */
 export class LocalStore {
-  constructor() {
+  /**
+   * `uidKey` is the localStorage prefix app.js already derives from `?me=`, passed in so
+   * the profile can live where name and color have always lived. Two tabs with different
+   * aliases are two people, and they must not share a profile.
+   */
+  constructor(uidKey = 'marginalia:uid') {
     this.db = null;
+    this.uidKey = uidKey;
     this.listeners = new Map();
     // BroadcastChannel makes a second browser tab behave like the other reader.
     // That's how you test the two-person flow before the backend exists.
@@ -224,9 +248,94 @@ export class LocalStore {
     return doc ? { data: doc.bytes } : null;
   }
 
-  /** Local mode has no invites. There's only ever one browser. */
-  async getInviteCode() {
+  /* ------------------------------------------------------------------ social
+     Local mode is one browser and no accounts, so most of this surface has nothing to
+     stand on. The pattern is the one getInviteCode set: reads answer emptily so the UI
+     can render its own empty state, and writes throw a sentence a person can act on
+     rather than failing silently. app.js guards these with isHosted() before calling,
+     so the throws are a backstop, not the normal path. */
+
+  static NEEDS_BACKEND = 'Sharing needs a backend. See DEPLOY.md.';
+
+  async getProfile() {
+    return {
+      userId: null,
+      name: localStorage.getItem(this.uidKey + ':name') ?? 'You',
+      color: localStorage.getItem(this.uidKey + ':color') ?? '#E9A13B',
+    };
+  }
+
+  async saveProfile({ name, color }) {
+    try {
+      localStorage.setItem(this.uidKey + ':name', name);
+      localStorage.setItem(this.uidKey + ':color', color);
+    } catch {
+      /* private mode — identity is ephemeral, everything else still works */
+    }
+  }
+
+  async listConnections() {
+    return [];
+  }
+
+  async listSharedBooks() {
+    return [];
+  }
+
+  /**
+   * The one social read with a real local answer. The members store is populated by the
+   * ?me= two-tab flow, so the share sheet shows who is actually in the book even though
+   * nobody can be added to it from here.
+   */
+  async listShares(docId) {
+    const members = await this.listMembers(docId);
+    return members.map((m) => ({
+      userId: m.userId, name: m.name, color: m.color,
+      revokedAt: null, leftMarks: true, isOwner: false,
+    }));
+  }
+
+  async findDuplicate() {
     return null;
+  }
+
+  /**
+   * Local mode can't hold the same book twice: putDocument keys documents by the file's
+   * own sha256 (see `id: hash`), so re-adding a file lands on the record already there.
+   * Duplicates need two accounts, which is a hosted idea.
+   */
+  async listDuplicates() {
+    return [];
+  }
+
+  /** No accounts to notify, and no socket. BroadcastChannel already covers the tabs. */
+  subscribeUser() {
+    return () => {};
+  }
+
+  async createInvite() {
+    throw new Error(LocalStore.NEEDS_BACKEND);
+  }
+  async redeemInvite() {
+    throw new Error(LocalStore.NEEDS_BACKEND);
+  }
+  async revokeInvite() {
+    throw new Error(LocalStore.NEEDS_BACKEND);
+  }
+  async shareDocument() {
+    throw new Error(LocalStore.NEEDS_BACKEND);
+  }
+  async revokeShare() {
+    throw new Error(LocalStore.NEEDS_BACKEND);
+  }
+  async leaveDocument() {
+    throw new Error(LocalStore.NEEDS_BACKEND);
+  }
+  async disconnect() {
+    throw new Error(LocalStore.NEEDS_BACKEND);
+  }
+  async mergeDocuments() {
+    throw new Error(LocalStore.NEEDS_BACKEND);
   }
 
   async listAnnotations(docId) {
@@ -287,7 +396,25 @@ export class LocalStore {
     const all = await tx(this.db, ['members'], 'readonly', (t) =>
       wrap(t.objectStore('members').getAll())
     );
-    return all.filter((m) => m.docId === docId);
+    // revokedAt for shape parity with the hosted adapter, which returns revoked members
+    // so their old highlights still have a name on them. Nothing revokes locally.
+    return all.filter((m) => m.docId === docId).map((m) => ({ revokedAt: null, ...m }));
+  }
+
+  /** One walk of the members store, grouped — same contract as the hosted adapter. */
+  async listMembersByDocument(docIds) {
+    const wanted = new Set(docIds);
+    const all = await tx(this.db, ['members'], 'readonly', (t) =>
+      wrap(t.objectStore('members').getAll())
+    );
+    const out = new Map();
+    for (const m of all) {
+      if (!wanted.has(m.docId)) continue;
+      const list = out.get(m.docId) ?? [];
+      list.push({ userId: m.userId, name: m.name, color: m.color });
+      out.set(m.docId, list);
+    }
+    return out;
   }
 
   async saveMember(docId, m) {

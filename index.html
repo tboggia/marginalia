@@ -166,11 +166,22 @@
 
   /* swatches (the who-dialog color picker) */
   .swatch {
+    position: relative;   /* the :disabled strike-through positions against this */
     width: 18px; height: 18px; border-radius: 50%;
     box-shadow: inset 0 0 0 1.5px rgba(0,0,0,.35);
     transition: transform .12s;
   }
-  .swatch:hover { transform: scale(1.15); }
+  .swatch:hover:not(:disabled) { transform: scale(1.15); }
+  /* Already worn by another reader of this book. Dimmed and struck through, because
+     dimming alone is the kind of difference that disappears on a bright screen — and
+     the tooltip and accessible name say whose it is. Not pointer-events:none like
+     .tool:disabled, or the tooltip explaining the rule never appears. */
+  .swatch:disabled { opacity: .3; cursor: not-allowed; }
+  .swatch:disabled::after {
+    content: ""; position: absolute; left: 50%; top: -1px; bottom: -1px;
+    width: 1.5px; margin-left: -.75px; border-radius: 1px;
+    background: var(--text); transform: rotate(45deg);
+  }
   .swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px currentColor; }
 
   /* --------------------------------------------------------------- notice
@@ -260,6 +271,14 @@
     content: ""; width: 5px; height: 5px; border-radius: 50%;
     background: var(--ink);
   }
+  /* Several readers in the same stretch of book, drawn once and counted. Three class
+     names so this beats .marker.them's font-size:0 without !important. The fill is
+     neutral on purpose — see renderSpine. */
+  .marker.them.cluster {
+    width: 17px; height: 17px;
+    font: 600 9px/1 var(--mono);
+  }
+  .marker.them.cluster::after { display: none; }
   /* Their lane needs a hairline of its own, or the dot floats in space with
      nothing to read it against. */
   #spine::after {
@@ -390,6 +409,15 @@
     margin-left: auto; font: 500 9px var(--mono); color: var(--faint);
   }
 
+  /* Which reader to jump to, when there's more than one to choose from. Same chrome as
+     the highlight popover; a column because these are a list, not a row of verbs. */
+  #pop[data-kind="readers"] {
+    flex-direction: column; align-items: stretch; gap: 0;
+    min-width: 186px; padding: 5px;
+  }
+  #pop[data-kind="readers"] button.act { height: 30px; gap: 8px; }
+  #pop .who-pos { margin-left: auto; font: 500 9px var(--mono); color: var(--faint); }
+
   /* ---------------------------------------------------------------- panel */
   #panel {
     grid-area: panel;
@@ -423,7 +451,7 @@
   .note-quote {
     font-size: 11.5px; line-height: 1.45; color: var(--muted);
     border-left: 2px solid var(--rule); padding-left: 7px; margin-bottom: 6px;
-    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
   }
   .note-body { font-size: 12.5px; line-height: 1.5; color: var(--text); white-space: pre-wrap; }
   /* Hover-revealed, like .recent-delete — a removal that's one click away shouldn't
@@ -476,9 +504,37 @@
     background: var(--panel);
   }
   .btn:hover { background: var(--rule); }
+  /* No pointer-events:none, unlike .tool:disabled — these carry a title explaining the
+     rule ("only the owner can invite readers"), and a button that can't be hovered
+     can't show it. */
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+  .btn:disabled:hover { background: var(--panel); }
   .btn.primary { background: var(--text); color: var(--ink); font-weight: 600; }
   .btn.primary:hover { background: #fff; }
   .btn.danger:hover { background: #4A1F1F; color: #F0A0A0; }
+
+  /* --------------------------------------------------------------- screens
+     The library and the people list are the same kind of object: a full-bleed
+     overlay that covers the reading area but not the topbar, so Books and You
+     stay reachable from inside them. They share the recipe rather than
+     repeating it — the inset in particular has to agree with #loading's, or a
+     screen and its spinner sit a few pixels apart.
+
+     Both stay hidden until boot() knows whether an auth screen is coming, so
+     neither flashes before the sign-in gate covers it.                      */
+  .screen {
+    position: absolute; inset: var(--top-h) 0 0 var(--spine-w);
+    overflow-y: auto; background: var(--ink); z-index: 20;
+    display: grid; place-items: start center;
+  }
+  .screen[hidden] { display: none; }
+  .screen-inner {
+    width: min(860px, calc(100% - 48px));
+    padding: 40px 0 56px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  .screen-head { display: flex; align-items: center; gap: 12px; }
+  .screen-head h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
 
   /* ---------------------------------------------------------------- start
      The library, not the loading dock. Adding a book happens a handful of
@@ -486,30 +542,132 @@
      shelf gets the covers, the space, and the top of the screen, and the
      drop zone shrinks to a strip underneath it. On a first run there's no
      shelf to show, so `data-empty` flips them back and the drop zone
-     becomes the whole screen again.
-
-     #start stays hidden until boot() knows whether an auth screen is
-     coming, so none of this flashes before the sign-in gate covers it.   */
-  #start {
-    position: absolute; inset: var(--top-h) 0 0 var(--spine-w);
-    overflow-y: auto; background: var(--ink); z-index: 20;
-    display: grid; place-items: start center;
-  }
-  #start[hidden] { display: none; }
+     becomes the whole screen again.                                      */
   #start[data-empty="true"] { place-items: center; }
-  #start-inner {
-    width: min(860px, calc(100% - 48px));
-    padding: 40px 0 56px;
-    display: flex; flex-direction: column; gap: 18px;
-  }
   #start[data-empty="true"] #start-inner { width: min(440px, calc(100% - 48px)); padding: 0; }
+  #start[data-empty="true"] .screen-head { display: none; }
 
-  #start-head { display: flex; align-items: center; gap: 12px; }
-  #start-head h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
-  #start[data-empty="true"] #start-head { display: none; }
+  /* ---------------------------------------------------------------- people
+     A person is a face, a name, and the books you hold in common. The row is
+     a disclosure: the count is the answer most of the time, and the covers
+     are there when it isn't.                                               */
+  /* A row is a div, never a button — it holds a disclosure and a remove action, and a
+     button inside a button is invalid and unreachable by keyboard. The row is the
+     layout; the controls inside it are the controls. */
+  .row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 12px; border-radius: 8px;
+    background: var(--panel);
+  }
+  .row + .row, .person + .person { margin-top: 8px; }
+  .row:hover { background: var(--raised); }
+  /* A revoked reader is still named next to their old highlights, so they stay
+     legible — dimmed, with the state also written out in .row-meta. Opacity is
+     never the only signal. */
+  .row[data-revoked="true"] { opacity: .62; }
+  .row-main { flex: 1; min-width: 0; }
+  /* When the name block is itself the disclosure control, it keeps the same box and
+     gains the chevron — so the hit target is the whole name area, not a 14px glyph. */
+  button.row-main { display: flex; align-items: center; gap: 10px; text-align: left; }
+  button.row-main > .row-text { flex: 1; min-width: 0; }
+  /* display:block because these are spans inside a <button> — ellipsis needs a
+     block box, and a button's children are inline by default. */
+  .row-name {
+    display: block;
+    font-size: 12.5px; line-height: 1.35; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .row-meta { display: block; margin-top: 2px; font-size: 11.5px; line-height: 1.35; color: var(--faint); }
+  /* Sits at the end of a .row. Hover/focus revealed like .book-del: removing someone
+     shouldn't be the most prominent thing on a list you read to see who's here. */
+  .row-act {
+    flex: none; height: 26px; padding: 0 9px; border-radius: 6px;
+    font-size: 11.5px; color: var(--muted); background: var(--raised);
+    opacity: 0; transition: opacity .12s, background .12s, color .12s;
+  }
+  .row:hover .row-act, .row:focus-within .row-act, .row-act:focus-visible { opacity: 1; }
+  .row-act:hover { background: #4A1F1F; color: #F0A0A0; }
+
+  /* The colored disc that stands for a person wherever there isn't room for a
+     name: people rows, the share sheet, the stack on a book cover. --ink on the
+     fill is the same guarantee the reader colors already make as filled markers
+     (7:1 or better — see the token block). */
+  .avatar {
+    flex: none; display: grid; place-items: center;
+    width: var(--avatar-size, 32px); height: var(--avatar-size, 32px);
+    border-radius: 50%;
+    font: 600 calc(var(--avatar-size, 32px) * .4)/1 var(--ui);
+    letter-spacing: .02em;
+    color: var(--ink); background: var(--avatar-color, var(--c-amber));
+  }
+
+  /* ------------------------------------------------------------- duplicates
+     Shown only when you actually hold one book twice — your copy and someone
+     else's of the same file. Deliberately not styled as a warning: nothing is
+     broken, there's just a better arrangement available. */
+  #dupes { display: flex; flex-direction: column; gap: 8px; }
+  #dupes h2 {
+    margin: 0; font-size: 15px; font-weight: 600;
+    letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+  }
+  /* Always visible, unlike .row-act — these buttons are the reason the row exists. */
+  .row-acts { display: flex; gap: 6px; flex: none; }
+  .row-acts .btn { height: 26px; padding: 0 10px; font-size: 11.5px; }
+  .row-note { display: block; margin-top: 3px; font-size: 11.5px; line-height: 1.45; color: var(--faint); }
+
+  .person-books {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    gap: 14px 12px; padding: 12px 12px 4px;
+  }
+  .person-books .book-title { font-size: 11.5px; }
+  /* The chevron turns to point down when the row is open. It's decorative: the
+     state a screen reader gets is aria-expanded on the row itself. */
+  .row-chev {
+    flex: none; width: 14px; height: 14px; color: var(--faint);
+    fill: none; stroke: currentColor; stroke-width: 1.8;
+    stroke-linecap: round; stroke-linejoin: round;
+    transition: transform .14s;
+  }
+  button.row-main[aria-expanded="true"] .row-chev { transform: rotate(90deg); }
+
+  /* The readers on a book cover, overlapped like a hand of cards. Bottom-left,
+     because .fmt already owns bottom-right. */
+  .stack { position: absolute; left: 6px; bottom: 6px; display: flex; }
+  .stack .avatar {
+    --avatar-size: 20px;
+    box-shadow: 0 0 0 2px rgba(9,12,16,.78);
+  }
+  .stack .avatar + .avatar { margin-left: -7px; }
+
+  /* --------------------------------------------------------- share dialog */
+  /* One dialog, two views. Revoking needs a question answered, not an OK — and
+     a second <dialog> on top of this one would stack backdrops and scatter
+     focus, so the sheet swaps its own contents instead. */
+  #share-dlg [data-view] { display: none; }
+  #share-dlg[data-view="list"] [data-view="list"] { display: block; }
+  #share-dlg[data-view="revoke"] [data-view="revoke"] { display: block; }
+  #share-list { max-height: 40vh; overflow-y: auto; margin: 0 0 4px; }
+  .share-add { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 8px; }
+  .share-add:hover { background: var(--raised); }
+  .share-add input[type="checkbox"] { flex: none; width: 15px; height: 15px; accent-color: var(--c-cyan); }
+  /* The whole row is the label, so the hit target is the row and not a 15px box. */
+  .share-add label {
+    flex: 1; min-width: 0; cursor: pointer;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12.5px;
+  }
+  .dlg p.sub-head { margin: 14px 0 6px; }
+  fieldset.choices { margin: 0 0 4px; padding: 0; border: 0; }
+  fieldset.choices legend { padding: 0; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  .choice { display: flex; gap: 10px; padding: 9px 10px; border-radius: 7px; cursor: pointer; }
+  .choice:hover { background: var(--raised); }
+  .choice input { flex: none; margin-top: 2px; accent-color: var(--c-cyan); }
+  .choice .t { font-size: 12.5px; color: var(--text); }
+  .choice .d { margin-top: 3px; font-size: 11.5px; line-height: 1.5; color: var(--faint); }
 
   /* ------------------------------------------------------------- the shelf */
   #shelf[hidden], #start[data-empty="true"] #shelf { display: none; }
+  #dupes[hidden], #start[data-empty="true"] #dupes { display: none; }
   #recent {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(138px, 1fr));
@@ -543,12 +701,12 @@
   .cover .jacket .jt {
     font: 600 13px/1.35 Georgia, "Iowan Old Style", "Times New Roman", serif;
     color: #F4F1EA;
-    display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 5; line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
   }
   .cover .jacket .ja {
     font: 400 10.5px/1.4 Georgia, "Iowan Old Style", "Times New Roman", serif;
     color: rgba(244,241,234,.86);
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
   /* The stitched edge. Cheap, and it's what sells "book" over "thumbnail". */
   .cover::after {
@@ -564,7 +722,7 @@
   }
   .book-title {
     margin-top: 9px; font-size: 12.5px; line-height: 1.35; color: var(--text);
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
   .book-author {
     margin-top: 2px; font-size: 11.5px; line-height: 1.35; color: var(--faint);
@@ -618,7 +776,7 @@
     background: var(--ink); z-index: 30;
   }
   #loading[hidden] { display: none; }
-  #loading .spinner {
+  .spinner {
     width: 28px; height: 28px; border-radius: 50%;
     border: 2.5px solid var(--rule); border-top-color: var(--c-cyan);
     animation: spin .8s linear infinite;
@@ -628,8 +786,26 @@
   /* The global reduced-motion rule kills the spin, which would leave a static
      ring reading as broken rather than busy. Drop it and let the text speak. */
   @media (prefers-reduced-motion: reduce) {
-    #loading .spinner { display: none; }
+    .spinner { display: none; }
   }
+
+  /* ------------------------------------------------------------------- boot
+     Covers the whole window from the first paint, before app.js has even run —
+     the topbar and spine are as much "book, not library" as the scroller, and
+     none of them have anything true to show until boot() decides what this
+     load is: a signed-in shelf, a sign-in gate, or a book an invite opened
+     straight to. Sits above #auth so it can't flash a stale card either. */
+  #boot {
+    position: fixed; inset: 0; z-index: 70;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px;
+    background: var(--ink);
+  }
+  #boot[hidden] { display: none; }
+  /* If boot() throws, the overlay is the only thing on screen — a spinner that
+     never stops is a lie, so it says what happened instead. */
+  #boot[data-failed="true"] .spinner { display: none; }
+  #boot-err { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--muted); text-align: center; }
 
   #auth {
     position: fixed; inset: 0; z-index: 50;
@@ -678,6 +854,11 @@
 </style>
 </head>
 <body>
+
+<div id="boot" role="status">
+  <div class="spinner"></div>
+  <p id="boot-err" hidden>Marginalia didn’t finish loading. Reload the page to try again.</p>
+</div>
 
 <div id="app" data-panel="open" data-ink="off" data-tool="select">
 
@@ -775,13 +956,21 @@
   </div>
 </div>
 
-<div id="start" hidden data-empty="true">
-  <div id="start-inner">
-    <div id="start-head">
+<div id="start" class="screen" hidden data-empty="true">
+  <div id="start-inner" class="screen-inner">
+    <div class="screen-head">
       <h1 id="shelf-head">Your books</h1>
       <div class="spacer"></div>
+      <button class="btn" id="t-people">People</button>
       <button class="btn primary" id="pick">Add a book</button>
     </div>
+
+    <!-- Only ever appears when you genuinely hold one book twice. Above the shelf
+         because it's about two of the cards below it. -->
+    <section id="dupes" aria-labelledby="dupes-head" hidden>
+      <h2 id="dupes-head">The same book, twice</h2>
+      <div id="dupes-list"></div>
+    </section>
 
     <section id="shelf" aria-labelledby="shelf-head" hidden>
       <div id="recent"></div>
@@ -795,6 +984,21 @@
     </div>
 
     <input type="file" id="file" accept="application/pdf,application/epub+zip,.pdf,.epub" hidden>
+  </div>
+</div>
+
+<div id="people" class="screen" hidden>
+  <div class="screen-inner">
+    <div class="screen-head">
+      <!-- tabindex="-1" so showPeople() can move focus here. Landing on the
+           heading tells a screen reader what screen it just arrived on; landing
+           on the first person tells it nothing. -->
+      <h1 id="people-head" tabindex="-1">People</h1>
+      <div class="spacer"></div>
+      <button class="btn" id="people-back">Your books</button>
+      <button class="btn primary" id="people-invite">Invite someone</button>
+    </div>
+    <section id="people-list" aria-labelledby="people-head"></section>
   </div>
 </div>
 
@@ -823,6 +1027,48 @@
   <div class="dlg-row">
     <button class="btn" value="cancel">Cancel</button>
     <button class="btn primary" value="save">Save</button>
+  </div>
+</form></dialog>
+
+<dialog id="share-dlg" data-view="list"><form method="dialog" class="dlg">
+  <div data-view="list">
+    <h2>Who's reading this</h2>
+    <p id="share-lede">Everyone here sees each other's highlights and where you all are.</p>
+    <div id="share-list"></div>
+    <div id="share-add-wrap" hidden>
+      <p class="sub-head">Add someone you're connected to</p>
+      <div id="share-add"></div>
+    </div>
+  </div>
+
+  <div data-view="revoke">
+    <h2 id="revoke-head">Remove reader</h2>
+    <fieldset class="choices">
+      <legend id="revoke-legend"></legend>
+      <label class="choice">
+        <input type="radio" name="leave-marks" value="keep" checked>
+        <span>
+          <span class="t">Leave their highlights</span>
+          <span class="d">Their marks and notes stay on the page for everyone still
+            reading. They stop seeing yours, and yours stop reaching them.</span>
+        </span>
+      </label>
+      <label class="choice">
+        <input type="radio" name="leave-marks" value="take">
+        <span>
+          <span class="t">Take their highlights with them</span>
+          <span class="d">Their marks disappear from this book. Nothing is deleted —
+            sharing it with them again brings every one of them back.</span>
+        </span>
+      </label>
+    </fieldset>
+  </div>
+
+  <div class="dlg-row">
+    <button class="btn" id="share-invite" value="invite" type="button">Copy invite link</button>
+    <div class="spacer"></div>
+    <button class="btn" value="cancel">Done</button>
+    <button class="btn danger" id="revoke-go" value="revoke" type="button" hidden>Remove</button>
   </div>
 </form></dialog>
 
