@@ -23,3 +23,11 @@ service-role*
 .DS_Store
 node_modules/
 /.claude
+
+# Supabase CLI scratch. config.toml, migrations/ and seed.sql are all committed
+# on purpose — they are what makes `supabase start` reproducible for anyone who
+# clones this. These four are per-machine state the CLI regenerates.
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+supabase/logs/

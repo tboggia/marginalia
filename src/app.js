@@ -305,7 +305,10 @@ const copyConnectInvite = () => copyInviteFrom($('#people-invite'), { kind: 'con
 function flashCopied(btn) {
   const label = btn.querySelector('.lbl');
   btn._label ??= label.textContent;
-  label.textContent = 'Copied — one use, 2 weeks';
+  // Single-use only. The fourteen-day expiry is the other half of the rule, but it's
+  // static text in the share sheet: nobody copies a link and sits on it for a fortnight,
+  // so it can't compete for room in a label that has 3 seconds to say "Copied".
+  label.textContent = 'Copied — this link works once';
   btn.dataset.copied = 'true';
   clearTimeout(btn._copyTimer);
   btn._copyTimer = setTimeout(() => {
@@ -721,6 +724,9 @@ async function showPeople() {
   // Books is how you leave, the same as from a book — so it has to be live here even
   // though no book is open.
   $('#t-home').disabled = false;
+  // And the same rule Books follows over the shelf: the button for the screen you're
+  // already on is greyed, not a click that does nothing.
+  $('#t-people').disabled = true;
   await renderPeople();
   // Announce the screen, not the first row. Focus has to land somewhere, and a
   // heading says where you are.
@@ -731,6 +737,7 @@ function hidePeople() {
   $('#people').hidden = true;
   $('#start').hidden = false;
   $('#t-home').disabled = !docId;
+  $('#t-people').disabled = false;
 }
 
 /**
@@ -788,11 +795,16 @@ function personCard(p, startOpen = false) {
   wrap.className = 'person';
   wrap.dataset.userId = p.userId;
 
-  const booksId = `person-books-${p.userId}`;
+  // The disclosed region is the panel, not the shelf inside it: opening a person
+  // reveals both what you share with them and what you can do about it.
+  const panelId = `person-panel-${p.userId}`;
+  const panel = document.createElement('div');
+  panel.className = 'person-panel';
+  panel.id = panelId;
+  panel.hidden = true;
+
   const books = document.createElement('div');
   books.className = 'person-books';
-  books.id = booksId;
-  books.hidden = true;
 
   const meta = p.status === 'pending'
     ? 'Invite not accepted yet'
@@ -802,32 +814,36 @@ function personCard(p, startOpen = false) {
 
   const row = personRow(p, {
     meta,
-    controls: booksId,
-    onToggle: (btn) => toggleSharedBooks(p, btn, books),
+    controls: panelId,
+    onToggle: (btn) => toggleSharedBooks(p, btn, panel, books),
   });
 
-  // The ✕ sits on the card, not in the row: as a labelled button parked at the end of a
-  // full-width row it read as the row's main action, which disconnecting is not. Same
-  // shape and same hover-reveal as .book-del on a cover.
+  // Spelled out, and only where you've already asked to see this person in full: as a
+  // bare ✕ parked on the card it was the one control on the screen whose meaning you
+  // had to guess, and guessing wrong disconnects someone.
+  const foot = document.createElement('div');
+  foot.className = 'person-foot';
   const act = document.createElement('button');
   act.type = 'button';
-  act.className = 'row-act';
-  act.textContent = '✕';
-  act.title = `Disconnect from ${p.name}`;
+  act.className = 'btn danger';
+  act.textContent = 'Disconnect';
+  // The visible label is a bare verb, which says nothing out of context.
   act.setAttribute('aria-label', `Disconnect from ${p.name}`);
   act.onclick = () => disconnectPerson(p);
+  foot.appendChild(act);
 
-  wrap.append(row, act, books);
-  if (startOpen) toggleSharedBooks(p, row.querySelector('.row-main'), books);
+  panel.append(books, foot);
+  wrap.append(row, panel);
+  if (startOpen) toggleSharedBooks(p, row.querySelector('.row-main'), panel, books);
   return wrap;
 }
 
-async function toggleSharedBooks(p, btn, container) {
+async function toggleSharedBooks(p, btn, panel, container) {
   const open = btn.getAttribute('aria-expanded') === 'true';
   btn.setAttribute('aria-expanded', String(!open));
-  container.hidden = open;
+  panel.hidden = open;
   // Drives the card's border: closed, the row is the whole object and needs no divider.
-  container.closest('.person').dataset.open = String(!open);
+  panel.closest('.person').dataset.open = String(!open);
   if (open || container.dataset.loaded === 'true') return;
 
   container.innerHTML = '<div class="empty">Loading…</div>';
@@ -1193,6 +1209,7 @@ function closeDoc() {
   delete app.dataset.open;
   // People and the shelf share a z-index; leaving People up would stack the two.
   $('#people').hidden = true;
+  $('#t-people').disabled = false;
   $('#start').hidden = false;
   renderShelf();
 }

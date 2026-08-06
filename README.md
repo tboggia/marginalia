@@ -27,11 +27,21 @@ so there are no environment variables in the usual sense — `src/config.js` rea
 Hosted also requires credentials in `src/config.js`; without them you get local mode
 everywhere, which is what a fresh clone does.
 
-To force one explicitly — testing the real backend before pushing, or demoing local mode
-from the deployed URL — add `?backend=supabase` or `?backend=local`. It sticks for the rest
-of the tab (`sessionStorage`), because the URL doesn't survive: the app strips the query
-string after handling `?join=`, and the magic-link round trip bounces through Supabase and
-back. Open a new tab to drop it.
+To force one explicitly, add a `?backend=` parameter:
+
+| `?backend=` | What you get |
+|---|---|
+| `local` | IndexedDB, no sign-in, the `?me=` multi-tab flow |
+| `supabase` | the **hosted** project in `src/config.js` — the last check before pushing |
+| `supabase-local` | Postgres, auth, realtime and storage running on your own machine under `supabase start` — see "Running the backend locally" |
+
+`supabase` still means hosted even on localhost, which is what it has always meant. The
+local stack is a third door rather than a redefinition of an existing one: the failure mode
+of getting that wrong is testing against the wrong database and believing the result.
+
+It sticks for the rest of the tab (`sessionStorage`), because the URL doesn't survive: the
+app strips the query string after handling `?join=`, and the magic-link round trip bounces
+through Supabase and back. Open a new tab to drop it.
 
 The console logs which mode it picked on every boot (`Marginalia: local · IndexedDB`).
 
@@ -81,6 +91,50 @@ To exercise it from your laptop before pushing, open
 `http://localhost:8000/?backend=supabase`. Note that magic-link sign-in will only complete
 if `http://localhost:8000` is listed under Supabase's Authentication → URL Configuration →
 Redirect URLs.
+
+### Running the backend locally
+
+The whole backend — Postgres, auth, realtime, storage — runs on your machine under the
+Supabase CLI, which means the hosted path can be exercised without touching the hosted
+project, waiting on a real inbox, or being careful about what you break.
+
+Needs Docker (Desktop or OrbStack) and `brew install supabase/tap/supabase`. Then:
+
+```bash
+supabase start                                    # first run pulls images
+python3 -m http.server 8000
+# open http://localhost:8000/?backend=supabase-local
+```
+
+Magic links never leave the machine: they land in the CLI's mail catcher, whose URL
+`supabase status` prints. Four accounts are seeded — `ash@`, `robin@`, `jules@` and
+`kit@marginalia.test` — so the multi-reader flows have people to be without signing
+anyone up. Kit is never a member of anything, which is what makes "does a stranger who
+signs up see my library" a question you can actually answer.
+
+`supabase/migrations/` is generated from `schema.sql` and `social.sql` rather than
+maintained alongside them — those two files stay the source of truth, and the SQL editor
+instructions under "Deploying" are unchanged. `supabase/sync-migrations.sh` does the copy
+(and strips `social.sql`'s outer `begin;`/`commit;`, which the CLI's migration runner
+supplies itself); `./test.sh` runs it for you, so the two cannot drift between a SQL edit
+and a test run.
+
+**Testing it.** `./test.sh` resets the database from those migrations and runs
+`tests/*.sql` against it: every RLS policy, every RPC, the table constraints, and the
+structural settings that fail silently rather than erroring — `replica identity full`, the
+`security definer` flags, the realtime publication. It is the automated version of the
+by-hand checks under "Check the policies before you trust them" below, and it runs in a few
+seconds.
+
+```bash
+./test.sh              # reset, then run everything
+./test.sh --no-reset   # against the database as it stands
+./test.sh 03           # just tests/03_invites.sql
+```
+
+What it does **not** cover is anything that only exists in a browser: the adapter, sign-in,
+the realtime socket, signed-URL streaming, or three real people sharing a book.
+`tests/MANUAL.md` is the checklist for those.
 
 
 ## Reading with other people
@@ -570,6 +624,15 @@ PLAN.md                 the technical plan, with model notes per phase
 schema.sql              Postgres tables + RLS. The RLS is the security model.
 migration.sql           brings a pre-EPUB database forward to schema.sql. Run social.sql after.
 social.sql              profiles, connections, invites, sharing, revocation, duplicate merge
+test.sh                 reset the local stack and run the SQL suite
+tests/00_helpers.sql    assertions, and becoming each user in turn
+tests/*.sql             one file per area: documents, annotations, invites, sharing, merge,
+                        structure, storage
+tests/MANUAL.md         the browser half, which no SQL test can reach
+supabase/config.toml    the local stack — ports, auth URLs, sign-up
+supabase/seed.sql       the books bucket and four test accounts
+supabase/migrations/    GENERATED from schema.sql + social.sql. Don't edit.
+supabase/sync-migrations.sh   regenerates the above
 src/config.js           credentials, plus the hostname-based local/hosted switch
 index.html              markup and styles
 src/geometry.js         normalize/denormalize, rect merging, stroke simplification
