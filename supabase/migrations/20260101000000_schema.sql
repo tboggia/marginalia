@@ -1,3 +1,7 @@
+-- GENERATED FILE — DO NOT EDIT.
+-- Source: schema.sql (repo root). Regenerate with supabase/sync-migrations.sh.
+-- Edit the source file; this copy is overwritten on every test run.
+
 -- Marginalia — Postgres schema for Supabase.
 -- Run in the SQL editor. Then create a PRIVATE storage bucket named "books".
 --

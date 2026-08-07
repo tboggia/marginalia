@@ -1,3 +1,7 @@
+-- GENERATED FILE — DO NOT EDIT.
+-- Source: social.sql (outer begin;/commit; stripped — see sync-migrations.sh) (repo root). Regenerate with supabase/sync-migrations.sh.
+-- Edit the source file; this copy is overwritten on every test run.
+
 -- social.sql — the social layer for Marginalia.
 --
 -- Run this AFTER schema.sql, in the Supabase SQL editor. A database created before this
@@ -14,7 +18,6 @@
 -- The security model is unchanged in kind. Every read still routes through is_member(),
 -- and the client is still never trusted to filter anything.
 
-begin;
 
 -- ============================================================================
 -- profiles — who someone is, independent of any one book
@@ -866,4 +869,3 @@ end $$;
 alter table memberships  replica identity full;
 alter table connections  replica identity full;
 
-commit;

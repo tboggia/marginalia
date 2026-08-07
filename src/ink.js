@@ -7,11 +7,14 @@
  *   Any laptop + trackpad  pointerType 'mouse', pressure is a constant 0.5
  *   Finger on a phone      pointerType 'touch', pressure 0 or 1, must still scroll
  *
- * Three rules keep those from fighting each other:
+ * Four rules keep those from fighting each other:
  *   1. A pen always draws, whatever mode the toolbar is in. Nobody picks up a stylus
  *      to scroll.
- *   2. Touch never draws. It scrolls, always. Ink mode doesn't change this, which is
- *      what makes palm rejection fall out for free — the palm is a touch.
+ *   2. Touch draws only in ink mode, and only on a device that can't ever produce a
+ *      'pen' event — see TOUCH_CAN_DRAW. Anywhere a stylus is possible, touch never
+ *      draws and scrolls instead, which is what makes palm rejection fall out for
+ *      free: the palm is a touch, and by the time it lands the pen has already
+ *      claimed the stroke.
  *   3. Mouse draws only in ink mode, because a mouse is also how you select text.
  */
 
@@ -19,6 +22,13 @@ import { toPage, simplify, smoothPath, quantize } from './geometry.js';
 
 const MIN_WIDTH = 0.0008; // fraction of page width
 const MAX_WIDTH = 0.0042;
+
+// A phone has no fine pointer at all, so no 'pen' event can ever arrive and there's
+// no palm to reject — touch is the only input it has, and Draw is unusable without
+// it. `any-pointer: fine` stays true on an iPad the moment it *can* pair a Pencil,
+// paired or not, which is what keeps this from racing a palm landing just ahead of
+// the pen tip on a device's very first stroke of a session.
+const TOUCH_CAN_DRAW = typeof matchMedia === 'function' && !matchMedia('(any-pointer: fine)').matches;
 
 export function strokeWidthFor(pressure, base) {
   // Pressure-to-width is deliberately not linear. Light contact should still leave a
@@ -30,7 +40,7 @@ export function strokeWidthFor(pressure, base) {
 
 export function shouldDraw(event, inkMode) {
   if (event.pointerType === 'pen') return true;
-  if (event.pointerType === 'touch') return false;
+  if (event.pointerType === 'touch') return TOUCH_CAN_DRAW && inkMode;
   return inkMode; // mouse
 }
 

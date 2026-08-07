@@ -121,7 +121,6 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     max-width: 30ch;
   }
-  #title:empty::before { content: "No book open"; color: var(--faint); font-weight: 400; }
   /* The author sits under the title rather than glued to it with an em dash, so a
      long title truncates without taking the author with it. */
   #titlebox { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 1px; }
@@ -159,10 +158,13 @@
      place in the book you're reading, which is meaningless with no book open. People
      takes its slot there instead, and stands down once you're reading. */
   #app:not([data-open]) :is(#sep-tools, #t-select, #t-ink, #t-erase,
-                            #zoom-out, #zoom-in, #zoom, #t-jump, #t-panel) {
+                            #zoom-out, #zoom-in, #zoom, #t-jump, #t-panel, #spine) {
     display: none;
   }
   #app[data-open] #t-people { display: none; }
+  /* Redundant beside the name it sits next to at desktop widths — see max-width:900px,
+     where the name is hidden and this becomes the button's only visible content. */
+  #t-who .avatar { display: none; }
 
   /* Which #t-panel glyph shows tracks whether the margin is open — the arrow icon
      signals "clicking tucks the panel away". */
@@ -316,10 +318,18 @@
     background: var(--ink);
     scrollbar-width: thin; scrollbar-color: var(--rule) transparent;
   }
-  #pages { padding: 28px 0 60vh; display: flex; flex-direction: column; align-items: center; gap: 20px; }
+  /* align-items isn't `center`: a flex container centers an overflowing child by
+     giving it a negative offset, which pins scrollLeft 0 to the *middle* of the page
+     and leaves its left edge permanently unreachable — the page reads as clipped (or,
+     on the narrow layout where the spine rail sits right at that boundary, as if the
+     spine were sitting on top of the book). `.page`'s own auto margins center it when
+     there's room and fall back to 0 — i.e. flush left, fully scrollable — the moment
+     there isn't, which is exactly the zoomed-in/no-margin case. */
+  #pages { padding: 28px 0 60vh; display: flex; flex-direction: column; align-items: flex-start; gap: 20px; }
 
   .page {
     position: relative; flex: none;
+    margin-left: auto; margin-right: auto;
     background: #fff;
     box-shadow: 0 1px 2px rgba(0,0,0,.5), 0 10px 34px rgba(0,0,0,.42);
   }
@@ -433,6 +443,9 @@
     overflow: hidden;
   }
   #app[data-panel="closed"] #panel { display: none; }
+  /* Only relevant on the mobile slide-over (see max-width:900px) — a plain
+     display:none here keeps it out of the way at every wider size. */
+  #panel-backdrop { display: none; }
   #panel-head {
     display: flex; align-items: center; gap: 8px;
     height: 38px; padding: 0 12px;
@@ -548,7 +561,7 @@
      Both stay hidden until boot() knows whether an auth screen is coming, so
      neither flashes before the sign-in gate covers it.                      */
   .screen {
-    position: absolute; inset: var(--top-h) 0 0 var(--spine-w);
+    position: absolute; inset: var(--top-h) 0 0 0;
     overflow-y: auto; background: var(--ink); z-index: 20;
     display: grid; place-items: start center;
   }
@@ -694,6 +707,26 @@
   .stack .avatar { --avatar-size: 7px; }
   .stack-more { font: 600 8.5px/1 var(--mono); color: var(--muted); }
 
+  /* ----------------------------------------------------------- who dialog */
+  /* Two views in one dialog, the same idiom as the share sheet below and for the
+     same two reasons: the second one asks a question rather than reporting one,
+     and a <dialog> on top of a <dialog> stacks backdrops and scatters focus.
+     Only the two body divs carry data-view — the footer buttons are toggled from
+     JS with `hidden`, because .btn's inline-flex centring can't survive being
+     switched to display:block and back. */
+  #who-dlg [data-view] { display: none; }
+  #who-dlg[data-view="who"] [data-view="who"] { display: block; }
+  #who-dlg[data-view="delete"] [data-view="delete"] { display: block; }
+  /* The same coral #share-msg uses for an error, which is the tested value for body
+     text on --raised. Never colour alone: the sentence says what it is, and the
+     heading above it already said "Delete". */
+  .dlg p.warn { margin: 0; color: #F2A08C; }
+  /* Same reason #share-msg exists rather than a toast: a <dialog> lives in the
+     browser's top layer, so a toast fired from inside one comes up behind it. */
+  #who-msg { margin: 12px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--c-cyan); }
+  #who-msg:empty { display: none; }
+  #who-msg[data-kind="error"] { color: #F2A08C; }
+
   /* --------------------------------------------------------- share dialog */
   /* One dialog, two views. Revoking needs a question answered, not an OK — and
      a second <dialog> on top of this one would stack backdrops and scatter
@@ -835,7 +868,7 @@
      whole spine to build the locations index are both multi-second waits that
      otherwise look like nothing happened.                                    */
   #loading {
-    position: absolute; inset: var(--top-h) 0 0 var(--spine-w);
+    position: absolute; inset: var(--top-h) 0 0 0;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 14px;
     background: var(--ink); z-index: 30;
@@ -907,14 +940,84 @@
   }
   #toast[data-show="true"] { opacity: 1; transform: translate(-50%, 0); }
 
+  /* A long press on an icon-only button (see .lbl below) stands in for the hover
+     tooltip a touch screen can't give you — see app.js bindLongPressTips. Same
+     idiom as #toast: fixed, faded in, never in the way of a real tap. */
+  #longpress-tip {
+    position: fixed; z-index: 65;
+    padding: 6px 10px; border-radius: 6px;
+    background: var(--raised); border: 1px solid var(--rule);
+    font-size: 11.5px; color: var(--text); white-space: nowrap;
+    opacity: 0; pointer-events: none; transition: opacity .12s;
+  }
+  #longpress-tip[data-show="true"] { opacity: 1; }
+
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
   }
   @media (max-width: 900px) {
-    :root { --panel-w: 0px; --spine-w: 64px; --them-lane: 19px; }
+    :root { --panel-w: 0px; --spine-w: 32px; --them-lane: 8px; }
     #app { grid-template-columns: var(--spine-w) 1fr 0; }
-    #panel { display: none; }
-    #zoom, #zoom-out, #zoom-in { display: none; }
+
+    /* Icons carry the whole toolbar at this width — the topbar has no room to
+       spell any of it out (see the "Together"/"Readers" overflow this replaced).
+       Every label stays in the DOM: each is still its button's accessible name,
+       and still what a long press shows (see app.js bindLongPressTips). */
+    .tool .lbl { display: none; }
+    /* `gap` only ever applies between flex items that are actually present, so
+       hiding .lbl above already closes the space it left — this is just a tighter
+       hit target now that each button is one glyph instead of a glyph and a word. */
+    .tool { padding: 0 8px; }
+    /* Icons-only narrows things a lot, but a long book title plus every icon can
+       still add up to more than a phone's width. Overflow used to mean a control
+       silently clipped half off-screen (an unreachable "Readers", in the report
+       this replaced) — scrolling the strip is the same information, reachable. */
+    #top { overflow-x: auto; scrollbar-width: none; }
+    #top::-webkit-scrollbar { display: none; }
+    /* The title truncates hard at this width anyway (a real title left almost no
+       room for the tools next to it) — it isn't worth the space, so it and its
+       flanking separator go. #sep-tools stays, as the one line between Books and
+       the tools. */
+    #titlebox, #sep-title { display: none; }
+    #t-who .avatar { display: block; --avatar-size: 16px; }
+
+    /* The pill only needs to be a pill because "p.147" doesn't fit in a dot — drop
+       the page number instead of the pill: the rail is already too narrow here for
+       both, and a color alone still answers "where am I" against the same-colored
+       ticks. Same shape .marker.them already uses for the same reason. */
+    .marker:not(.them) {
+      width: 14px; height: 14px; min-width: 0; padding: 0;
+      border-radius: 50%; font-size: 0;
+    }
+
+    /* The panel has nowhere to live beside the book at this width, so it becomes a
+       slide-over instead of a grid column. #t-panel already toggles data-panel
+       open/closed; this is just what that toggle now animates. The closed state
+       stays `display:flex` (overriding the desktop rule two blocks up, which would
+       otherwise remove it from the layout — you can't animate to `display:none`)
+       and instead translates off-screen, where html/body's overflow:hidden keeps
+       it out of reach. */
+    #panel, #app[data-panel="closed"] #panel {
+      display: flex;
+      position: fixed; z-index: 26;
+      top: var(--top-h); right: 0; bottom: 0; left: auto;
+      width: min(86vw, 340px);
+      transform: translateX(100%);
+      transition: transform .22s cubic-bezier(.22,1,.36,1);
+    }
+    #app[data-panel="open"] #panel { transform: translateX(0); }
+
+    /* Tapping the dimmed reading area behind the sheet closes it — see app.js,
+       which wires this to the same toggle as #t-panel. */
+    #panel-backdrop {
+      display: block;
+      position: fixed; z-index: 24;
+      top: var(--top-h); right: 0; bottom: 0; left: 0;
+      background: rgba(5,7,10,.55);
+      opacity: 0; pointer-events: none;
+      transition: opacity .22s;
+    }
+    #app[data-panel="open"] #panel-backdrop { opacity: 1; pointer-events: auto; }
   }
 </style>
 </head>
@@ -930,9 +1033,9 @@
   <header id="top">
     <button class="tool" id="t-home" title="Close this book and see your library" disabled>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5C5.6 4.4 8.6 4.4 12 6.3c3.4-1.9 6.4-1.9 9-.8v13.3c-2.6-1.1-5.6-1.1-9 .8-3.4-1.9-6.4-1.9-9-.8z"/><path d="M12 6.3v13.3"/></svg>
-      Books
+      <span class="lbl">Books</span>
     </button>
-    <div class="sep"></div>
+    <div class="sep" id="sep-title"></div>
     <div id="titlebox">
       <div id="title"></div>
       <div id="byline" hidden></div>
@@ -940,13 +1043,13 @@
     <div class="sep" id="sep-tools"></div>
 
     <button class="tool" id="t-select" aria-pressed="true" title="Select text to highlight">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l7 16 2-7 7-2z"/></svg>Select
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l7 16 2-7 7-2z"/></svg><span class="lbl">Select</span>
     </button>
     <button class="tool" id="t-ink" aria-pressed="false" title="Draw with a stylus (a pen always draws)">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3l4 4L8 20l-5 1 1-5z"/></svg>Draw
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3l4 4L8 20l-5 1 1-5z"/></svg><span class="lbl">Draw</span>
     </button>
     <button class="tool" id="t-erase" aria-pressed="false" title="Erase your own ink">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16l6-6 8 8-3 3H7zM10 10l5-5 8 8-5 5"/></svg>Erase
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16l6-6 8 8-3 3H7zM10 10l5-5 8 8-5 5"/></svg><span class="lbl">Erase</span>
     </button>
 
     <div class="spacer"></div>
@@ -959,19 +1062,26 @@
     <div class="sep"></div>
     <button class="tool" id="t-jump" title="Jump to where they are">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s7-5.6 7-11a7 7 0 10-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>
-      <span id="jump-label">Find them</span>
+      <span class="lbl" id="jump-label">Find them</span>
     </button>
     <button class="tool" id="t-invite" title="See and change who's reading this book" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 007.5.5l3-3a5 5 0 00-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 00-7.5-.5l-3 3a5 5 0 007 7L12 19"/></svg>
-      Readers
+      <span class="lbl">Readers</span>
     </button>
     <!-- Takes the slot "Find them" occupies while a book is open. Both are about other
          people; which one is useful depends entirely on whether you're reading. -->
     <button class="tool" id="t-people" title="The people you read with">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19a5.5 5.5 0 0111 0"/><path d="M16 5.2a3.2 3.2 0 010 5.6"/><path d="M17.5 13.6a5.5 5.5 0 013 4.9"/></svg>
-      People
+      <span class="lbl">People</span>
     </button>
-    <button class="tool" id="t-who" title="Change your name and color">You</button>
+    <!-- The dot is your own color — everywhere else in the app a reader is their
+         color before they're their name (the spine marker, the stack on a cover),
+         so this is what stands in for the name on mobile rather than an unrelated
+         glyph. See app.js syncWhoButton. -->
+    <button class="tool" id="t-who" title="Change your name and color">
+      <span class="avatar" id="who-avatar" aria-hidden="true"></span>
+      <span class="lbl" id="who-label">You</span>
+    </button>
     <button class="tool" id="t-panel" aria-pressed="true" aria-controls="panel"
             title="Hide the margin" aria-label="Hide the margin">
       <!-- Two glyphs, one visible at a time (see #t-panel CSS): the notes icon
@@ -1008,6 +1118,11 @@
   </nav>
 
   <main id="scroller"><div id="pages"></div></main>
+
+  <!-- Mobile only: the panel becomes a slide-over there (see the max-width:900px
+       block), and this is what a tap outside it closes against. Inert on desktop,
+       where the panel already lives in its own grid column. -->
+  <div id="panel-backdrop"></div>
 
   <aside id="panel">
     <div id="panel-head"><span>Margin</span><div class="spacer"></div><span id="note-count"></span></div>
@@ -1097,14 +1212,41 @@
   </div>
 </form></dialog>
 
-<dialog id="who-dlg"><form method="dialog" class="dlg">
-  <h2>Who's reading</h2>
-  <p>Your name and color appear in the margin and on the spine. Open this book in a second tab to see the other side.</p>
-  <input type="text" id="who-name" placeholder="Your name" maxlength="24">
-  <div style="margin-top:12px"><div id="who-palette" class="swatch-row" style="display:flex;gap:8px"></div></div>
+<dialog id="who-dlg" data-view="who"><form method="dialog" class="dlg">
+  <div data-view="who">
+    <h2>Who's reading</h2>
+    <p>Your name and color appear in the margin and on the spine. Open this book in a second tab to see the other side.</p>
+    <input type="text" id="who-name" placeholder="Your name" maxlength="24">
+    <div style="margin-top:12px"><div id="who-palette" class="swatch-row" style="display:flex;gap:8px"></div></div>
+  </div>
+
+  <!-- A second view rather than a confirm(). This is the only thing in the app that
+       can't be undone by doing it again backwards, and a native dialog answered with a
+       reflexive Enter is the wrong lock on it — the same reasoning the share sheet's
+       revoke view is built on. -->
+  <div data-view="delete">
+    <h2>Delete your account</h2>
+    <!-- Written at open time: what it costs depends on how many books you added and
+         whether anyone else is reading them. -->
+    <p id="who-delete-what"></p>
+    <!-- The session dies with the account row, so the other device's next refresh fails.
+         Not "signs you out everywhere" — an access token already issued stays valid for
+         up to an hour, and claiming otherwise would be claiming more than is true. -->
+    <p class="warn">This can't be undone. Any other device signed in to this account stops working.</p>
+  </div>
+
+  <p id="who-msg" role="status" aria-live="polite"></p>
+
   <div class="dlg-row">
+    <!-- type="button" twice over: these swap the view instead of closing the dialog, and
+         a submit button here would also be what Enter in the name field lands on. The
+         first submit button in the form stays Cancel, which is the right answer to a
+         stray keystroke in both views. -->
+    <button class="btn danger" id="who-delete" type="button" hidden>Delete account</button>
+    <div class="spacer"></div>
     <button class="btn" value="cancel">Cancel</button>
-    <button class="btn primary" value="save">Save</button>
+    <button class="btn primary" id="who-save" value="save">Save</button>
+    <button class="btn danger" id="who-delete-go" type="button" hidden>Delete account</button>
   </div>
 </form></dialog>
 
@@ -1167,6 +1309,11 @@
 <!-- polite, not assertive: toasts here confirm things the user just did.
      assertive would interrupt a screen reader mid-sentence to say "saved". -->
 <div id="toast" role="status" aria-live="polite"></div>
+
+<!-- What a long press on an icon-only toolbar button shows — see #t-home etc. on
+     mobile and app.js bindLongPressTips. role=tooltip, not status: it's a label
+     for the thing under a finger, not an announcement. -->
+<div id="longpress-tip" role="tooltip" aria-hidden="true"></div>
 
 <script type="module" src="./src/app.js"></script>
 </body>

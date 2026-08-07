@@ -1,0 +1,46 @@
+# Local Supabase stack — `supabase start`.
+#
+# Deliberately minimal. Every key the CLI understands has a sane default, and an
+# unrecognised key is a hard parse error rather than a warning, so this file sets
+# only what actually differs from the defaults for this project. If you ever want
+# the full annotated version, `supabase init --force` in a scratch directory will
+# print one for your exact CLI version.
+#
+# `db.major_version` is intentionally absent: let the CLI pick the Postgres it
+# ships with. Your Homebrew postgresql@18 is NOT this server — the stack runs its
+# own Postgres in Docker on 54322. PG18's psql is still what talks to it.
+
+project_id = "marginalia"
+
+[api]
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+
+[db]
+port = 54322
+shadow_port = 54320
+
+[storage]
+enabled = true
+
+# The single most common thing to get wrong on a real deployment, per the README:
+# a magic link issued for a URL that isn't listed here bounces to the site root
+# with no error explaining why. Locally the app is served by `python3 -m
+# http.server 8000`, so 8000 is the URL that has to be listed — not 54321.
+#
+# Sign-up must stay ON. Every person you invite, connect, or share a book with
+# needs to be able to create an account first; RLS is what keeps a stranger with
+# an account from seeing your books, not a closed signup form.
+[auth]
+enabled = true
+site_url = "http://localhost:8000"
+additional_redirect_urls = ["http://localhost:8000", "http://127.0.0.1:8000"]
+enable_signup = true
+
+# Locally, magic links never leave the machine — they land in the CLI's built-in
+# mail catcher (`supabase status` prints its URL). That is what makes the whole
+# invite round trip testable in seconds instead of via a real inbox.
+[auth.email]
+enable_signup = true
+enable_confirmations = false

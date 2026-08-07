@@ -247,6 +247,52 @@ export class SupabaseStore {
       .from('memberships').update({ display_name: name }).eq('user_id', this.user.id);
   }
 
+  /**
+   * What deleting this account would do to each book they added: 'delete' for the ones
+   * nobody else is reading, 'handover' for the ones that pass to their earliest-joined
+   * reader. Read before the deed, because it's also what the dialog counts to tell them
+   * what they're about to lose.
+   */
+  async accountDeletionPlan() {
+    const { data, error } = await this.sb.rpc('account_deletion_plan');
+    if (error) throw new Error(error.message);
+    return (data ?? []).map((r) => ({
+      docId: r.document_id, title: r.title, storagePath: r.storage_path, action: r.action,
+    }));
+  }
+
+  /**
+   * Irreversible, and the only hard delete the app performs. The order is the same one
+   * deleteDocument uses and for the same reason: `delete_books` authorizes a removal by
+   * joining back to `documents`, so every object has to leave the bucket while its row
+   * still exists. Once delete_account() has run there is no row to join, and no account
+   * either.
+   *
+   * The server re-derives which books those are rather than accepting this list — see
+   * account_deletion_plan in social.sql.
+   */
+  async deleteAccount() {
+    const plan = await this.accountDeletionPlan();
+    const paths = plan.filter((p) => p.action === 'delete').map((p) => p.storagePath);
+
+    if (paths.length) {
+      const { error } = await this.sb.storage.from('books').remove(paths);
+      // Deliberately not fatal. A file left in the bucket with no row pointing at it is
+      // unreachable and costs a few megabytes; an account half-deleted because the
+      // storage API had a bad minute is a person who asked to leave and didn't.
+      if (error) console.warn('Marginalia: some book files were left in the bucket', error);
+    }
+
+    const { error } = await this.sb.rpc('delete_account');
+    if (error) throw new Error(error.message);
+
+    // scope: 'local' skips the round trip to /logout, which would be a signed request on
+    // behalf of a user that no longer exists. There is nothing left to revoke server-side
+    // — the session dies with the row — so this is only about clearing this browser.
+    await this.sb.auth.signOut({ scope: 'local' });
+    this.user = null;
+  }
+
   async listConnections() {
     const { data, error } = await this.sb.rpc('list_connections');
     if (error) throw new Error(error.message);

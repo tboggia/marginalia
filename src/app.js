@@ -34,6 +34,9 @@ const COLORS = [
 
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
+// Must stay in step with the max-width:900px breakpoint in index.html — this is
+// where the panel becomes a slide-over and the toolbar drops to icons only.
+const isMobile = () => matchMedia('(max-width: 900px)').matches;
 
 /* ------------------------------------------------------------------ identity
    ?me=anything gives this tab its own identity. That's the whole two-person
@@ -55,6 +58,13 @@ function setPref(key, val) {
   } catch {
     /* private mode, or an environment with storage disabled — identity is
        ephemeral, but everything else still works */
+  }
+}
+function clearPref(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* same as setPref, and with less at stake: these keys are a cache of the profile */
   }
 }
 
@@ -184,7 +194,7 @@ async function boot() {
   bindWhoDialog();
   bindPeople();
   bindShareDialog();
-  $('#t-who').textContent = me.name;
+  syncWhoButton();
   await renderShelf();
   await handleInviteLink();
   // Only now is it known that no auth gate is coming (and whether an invite already
@@ -359,6 +369,14 @@ function avatarEl(person, size) {
   el.style.setProperty('--avatar-color', person.color ?? COLORS[0].hex);
   el.setAttribute('aria-hidden', 'true');
   return el;
+}
+
+/** #t-who's name and color dot. Its own function (rather than setting textContent
+ * inline) because the dot needs to change alongside the name every time it does —
+ * once at boot, once on every save in the who dialog. */
+function syncWhoButton() {
+  $('#who-label').textContent = me.name;
+  $('#who-avatar').style.setProperty('--avatar-color', me.color);
 }
 
 /**
@@ -1350,6 +1368,60 @@ function setTool(t) {
   $('#t-erase').ariaPressed = String(t === 'erase');
 }
 
+/** The margin panel's open/closed state, and everything that has to agree with it:
+ * the toggle button's pressed state and tooltip, and — on mobile, where the panel is
+ * a slide-over rather than a column (see max-width:900px) — the dimmed backdrop
+ * behind it, driven off the same `data-panel` attribute in CSS. */
+function setPanelOpen(open) {
+  app.dataset.panel = open ? 'open' : 'closed';
+  $('#t-panel').ariaPressed = String(open);
+  // The glyph swap lives in CSS (data-panel); the tooltip has to follow it here.
+  $('#t-panel').title = open ? 'Hide the margin' : 'Show the margin';
+}
+
+/** Stand-in for the hover tooltip on icon-only buttons (see .lbl in the mobile
+ * breakpoint, which hides the text label and leaves `title` as the only description
+ * left). Touch has no hover, so a hold shows it instead — same idiom as a native
+ * tooltip: appears while held, gone the moment you let go. Delegated to `document`
+ * rather than bound per-button, so it keeps working as the toolbar's buttons are
+ * enabled/disabled/hidden around it. */
+function bindLongPressTips() {
+  const tip = $('#longpress-tip');
+  let timer = null;
+  let from = null;
+
+  const place = (x, y) => {
+    const r = tip.getBoundingClientRect();
+    tip.style.left = Math.min(Math.max(8, x - r.width / 2), innerWidth - r.width - 8) + 'px';
+    tip.style.top = Math.max(8, y - r.height - 12) + 'px';
+  };
+  const hide = () => {
+    clearTimeout(timer);
+    from = null;
+    tip.dataset.show = 'false';
+  };
+
+  document.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    const el = e.target.closest?.('.tool[title]');
+    if (!el || el.disabled) return;
+    from = { x: e.clientX, y: e.clientY };
+    timer = setTimeout(() => {
+      tip.textContent = el.title;
+      tip.dataset.show = 'true';
+      place(e.clientX, e.clientY);
+    }, 500);
+  });
+  // A finger sliding off the button it landed on is a scroll, not a hold — the same
+  // distinction bindSelection draws between a tap and a drag.
+  document.addEventListener('pointermove', (e) => {
+    if (!from || e.pointerType !== 'touch') return;
+    if (Math.hypot(e.clientX - from.x, e.clientY - from.y) > 6) hide();
+  });
+  document.addEventListener('pointerup', hide);
+  document.addEventListener('pointercancel', hide);
+}
+
 function bindTools() {
   // One "back to the library" control for both places you can be away from it: reading a
   // book, or looking at People. Two separate exits for the same destination was one more
@@ -1365,13 +1437,16 @@ function bindTools() {
   $('#zoom-in').onclick = () => zoomBy(0.2);
   $('#zoom-out').onclick = () => zoomBy(-0.2);
 
-  $('#t-panel').onclick = () => {
-    const open = app.dataset.panel === 'open';
-    app.dataset.panel = open ? 'closed' : 'open';
-    $('#t-panel').ariaPressed = String(!open);
-    // The glyph swap lives in CSS (data-panel); the tooltip has to follow it here.
-    $('#t-panel').title = open ? 'Show the margin' : 'Hide the margin';
-  };
+  $('#t-panel').onclick = () => setPanelOpen(app.dataset.panel !== 'open');
+  // Mobile only (see max-width:900px): the panel is a slide-over there, and the
+  // dimmed area behind it is the other way to dismiss it — same action as the
+  // button, just a bigger target. Inert on desktop; the backdrop stays display:none.
+  $('#panel-backdrop').onclick = () => setPanelOpen(false);
+  // The panel defaults open in markup, which is right for the desktop column but
+  // would cover the whole book on first load where it's a slide-over instead.
+  if (isMobile()) setPanelOpen(false);
+
+  bindLongPressTips();
 
   // One other reader is still one click — the button goes straight there, as it always
   // did. More than one and there's a question to answer first, so it opens a picker.
@@ -2249,6 +2324,18 @@ function bindShareDialog() {
 }
 
 function openWhoDialog() {
+  const dlg = $('#who-dlg');
+  dlg.dataset.view = 'who';
+  whoMsg(null);
+  $('#who-save').hidden = false;
+  $('#who-delete-go').hidden = true;
+  /* Local mode has no account. Identity is a localStorage key, the books are in this
+     browser's IndexedDB, and there is no server holding either — so this isn't a control
+     with a rule to explain in a tooltip, the way the disabled invite button is. It's an
+     action that doesn't exist here, and it's hidden. */
+  $('#who-delete').hidden = !isHosted();
+  $('#who-delete').disabled = false;
+
   $('#who-name').value = me.name;
   const wrap = $('#who-palette');
   wrap.innerHTML = '';
@@ -2285,6 +2372,102 @@ function openWhoDialog() {
   $('#who-dlg').showModal();
 }
 
+/**
+ * Feedback from inside the who dialog. Not toast(), for the same reason shareMsg isn't:
+ * a <dialog> renders in the browser's top layer, above every z-index on the page, so a
+ * toast fired while it's open comes up behind it and behind its own backdrop blur.
+ */
+function whoMsg(text, kind) {
+  const el = $('#who-msg');
+  el.textContent = text ?? '';
+  if (kind) el.dataset.kind = kind;
+  else delete el.dataset.kind;
+}
+
+/**
+ * The second view of the who dialog: what deleting the account actually costs, in the
+ * words of this particular account.
+ *
+ * The numbers come from the server rather than from the shelf. The shelf holds books you
+ * can *see*, which is a different set from the books you *added* — and only the second
+ * set is at stake here. Which of those go and which stay with their other readers is a
+ * question only memberships can answer, so account_deletion_plan answers it.
+ */
+async function askDeleteAccount() {
+  const dlg = $('#who-dlg');
+  const btn = $('#who-delete');
+
+  btn.disabled = true;
+  let plan;
+  try {
+    plan = await store.accountDeletionPlan();
+  } catch (e) {
+    // Stay on the first view: nothing has been asked yet, and this is a failure to
+    // describe the question rather than an answer to it.
+    whoMsg(e.message, 'error');
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = false;
+
+  const gone = plan.filter((p) => p.action === 'delete').length;
+  const kept = plan.length - gone;
+  const lines = [
+    'Your highlights, notes and reading positions are removed from every book — ' +
+      'including the ones other people shared with you.',
+  ];
+  if (gone) {
+    lines.push(gone === 1
+      ? 'The book you added that nobody else is reading is deleted.'
+      : `The ${gone} books you added that nobody else is reading are deleted.`);
+  }
+  if (kept) {
+    lines.push(kept === 1
+      ? 'The book you added that someone else is still reading stays with them, along ' +
+        'with their own highlights in it.'
+      : `The ${kept} books you added that other people are still reading stay with them, ` +
+        'along with their own highlights in them.');
+  }
+  if (!plan.length) lines.push('You haven’t added any books, so nobody else loses anything.');
+  $('#who-delete-what').textContent = lines.join(' ');
+
+  dlg.dataset.view = 'delete';
+  $('#who-save').hidden = true;
+  btn.hidden = true;
+  const go = $('#who-delete-go');
+  go.hidden = false;
+  go.disabled = false;
+  // Same as the revoke view: focus the button that answers the question, so Enter means
+  // the thing the person is looking at rather than whatever the form would have picked.
+  go.focus();
+}
+
+async function doDeleteAccount() {
+  const go = $('#who-delete-go');
+  go.disabled = true;
+  whoMsg('Deleting…');
+  try {
+    await store.deleteAccount();
+  } catch (e) {
+    go.disabled = false;
+    whoMsg(e.message, 'error');
+    return;
+  }
+
+  // The name and color under this key were that account's. Leaving them behind would hand
+  // them to whoever signs in next in this browser.
+  clearPref(uidKey + ':name');
+  clearPref(uidKey + ':color');
+
+  /* A reload, rather than tearing the session down by hand. boot() is the only thing that
+     decides between the auth gate and the shelf, and every piece of state this tab holds
+     — the shelf, the open book, the realtime channel — belongs to an account that no
+     longer exists. replace() so Back doesn't return to a page built for that account, and
+     pathname alone because the query string may still carry a ?join= code (the ?backend=
+     override lives in sessionStorage and survives this). */
+  location.replace(location.pathname);
+}
+
 function bindWhoDialog() {
   /* Implicit submission in a dialog form takes the *first* submit button, which
      here is Cancel — so Enter in the name field would discard the edit. Route it
@@ -2295,9 +2478,20 @@ function bindWhoDialog() {
     $('#who-dlg').querySelector('button[value="save"]').click();
   });
 
+  $('#who-delete').onclick = askDeleteAccount;
+  $('#who-delete-go').onclick = doDeleteAccount;
+
   $('#who-dlg').addEventListener('close', async (e) => {
     const dlg = $('#who-dlg');
-    if (dlg.returnValue !== 'save') return;
+    /* Escape closes the dialog outright, from either view. Reset it so the next open
+       doesn't land mid-question, the same way the share sheet resets its own. */
+    const wasAsking = dlg.dataset.view === 'delete';
+    dlg.dataset.view = 'who';
+    whoMsg(null);
+    /* Nothing said from the delete view is a "save" — the name field wasn't on screen to
+       be edited. Save is hidden there so this can't fire today; it's here so that
+       reordering the footer later can't turn "no, don't delete me" into a rename. */
+    if (dlg.returnValue !== 'save' || wasAsking) return;
     me.name = $('#who-name').value.trim() || 'You';
     me.color = dlg._pick();
     setPref(uidKey + ':name', me.name);
@@ -2310,7 +2504,7 @@ function bindWhoDialog() {
     } catch (err) {
       toast(err.message);
     }
-    $('#t-who').textContent = me.name;
+    syncWhoButton();
     if (docId) {
       await store.saveMember(docId, { userId: me.id, name: me.name, color: me.color });
       const i = members.findIndex((m) => m.userId === me.id);

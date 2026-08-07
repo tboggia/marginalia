@@ -289,6 +289,16 @@ export class LocalStore {
   }
 
   /**
+   * Nothing to plan for. There is no account here — identity is a localStorage key and
+   * the books are in this browser's IndexedDB — so the dialog that would read this never
+   * opens in local mode (app.js hides the button). Answering emptily rather than throwing
+   * keeps it to the read/write split the rest of this section uses.
+   */
+  async accountDeletionPlan() {
+    return [];
+  }
+
+  /**
    * The one social read with a real local answer. The members store is populated by the
    * ?me= two-tab flow, so the share sheet shows who is actually in the book even though
    * nobody can be added to it from here.
@@ -342,6 +352,15 @@ export class LocalStore {
   }
   async mergeDocuments() {
     throw new Error(LocalStore.NEEDS_BACKEND);
+  }
+  /* Not NEEDS_BACKEND: "there's nobody to share with" is the wrong sentence for someone
+     who asked to delete an account. The honest answer is that this copy never made one,
+     and that the books they can see are removed one at a time from the shelf. */
+  async deleteAccount() {
+    throw new Error(
+      'This copy of Marginalia runs only in this browser, so there’s no account to delete. ' +
+        'Remove books from the shelf to clear what’s stored here.'
+    );
   }
 
   async listAnnotations(docId) {

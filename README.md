@@ -177,6 +177,17 @@ readers a book can hold anymore, so unlike the old two-reader design, a spent li
 automatically harmless. If one leaks before it's used, the share sheet can mint another;
 the old one just stops working.
 
+**Leaving for good.** *You* in the topbar — the same dialog that holds your name and
+color — has a **Delete account** button. It asks once more first, and the question it
+asks is specific to you: how many books you added nobody else is reading (those go), and
+how many other people are still reading (those stay, with their readers' highlights
+intact and with the book passing to whoever joined it first). Your own highlights, notes
+and reading positions are removed from every book, including books other people shared
+with you. This is the only thing in the app that can't be undone by doing it backwards —
+leaving a book is reversible by design, leaving entirely is not. The button doesn't
+appear in local mode: there's no account there to delete, and removing books from the
+shelf is what clears what's stored in the browser.
+
 
 ## Controls
 
@@ -408,6 +419,45 @@ than two people. The token carries its own limits instead:
 membership insert wouldn't: it also connects the two accounts, which is what makes the new
 reader show up on the owner's People screen rather than being a stranger with highlights.
 
+### Deleting an account is the only hard delete
+
+`delete_account()` takes no arguments, and that *is* the security model: there's no account id to
+pass and therefore none to tamper with. It deletes `auth.uid()`, so the worst a hostile client can
+do with it is leave.
+
+Almost none of the work is in the function. The profile, the connections, the invites, and every
+highlight, note and reading position the account ever wrote hang off an `on delete cascade` to
+`auth.users`, so `delete from auth.users where id = auth.uid()` is the last line and does most of
+the job. What the function handles is the two things that deliberately *don't* cascade:
+
+- **`documents.created_by` has no cascade, on purpose.** A book the departing account added but
+  someone else is still reading can't be deleted — that would take the other readers' highlights
+  with it — and it can't be left ownerless either, because every owner check in `social.sql`
+  (`delete_documents`, `delete_books`, `share_document`, `revoke_share`, the `invites` policy)
+  reads `created_by`, and a `NULL` there is a book nobody can share, delete, or even leave.
+  Ownership is handed to whoever joined earliest instead. Books nobody else is reading are
+  deleted outright. Without the hand-over the account simply couldn't leave: the foreign key
+  refuses, which is a much better failure than a silent orphan.
+- **`memberships.shared_by` drops to `NULL`.** It records who let you into a book, not a
+  dependency on them still being here — losing the person mustn't lose the membership and every
+  mark hanging off it. It gets `on delete set null` for that reason; as a plain reference it
+  would block the deletion outright.
+
+Storage is the client's half, and the order matters: `delete_books` authorizes a removal by
+joining back to `documents`, so every object has to leave the bucket **before** the rows do.
+`account_deletion_plan()` is read first for exactly that — it returns each book the account added,
+its storage path, and whether it's a `delete` or a `handover`. The adapter clears the `delete`
+paths from the bucket, then calls `delete_account()`, which re-derives the same split server-side
+rather than accepting the client's list. The dialog uses the same read to tell you what leaving
+will actually cost before you answer.
+
+Two failure modes worth knowing before you deploy this. `delete_account()` runs as its owner
+(`postgres`), and `auth.users` belongs to `supabase_auth_admin` — `social.sql` issues
+`grant delete on table auth.users to postgres` inside a `DO` block that raises a **notice** rather
+than an error if the role can't grant it, so watch for that notice on first run. And some versions
+of the storage schema give `storage.objects.owner` a foreign key to `auth.users` with no cascade;
+the function clears that column for the departing account first, guarded on the column existing.
+
 ### Auth: magic link, and the one setting that silently breaks it
 
 Sign-in is `supabase.auth.signInWithOtp` with `emailRedirectTo` set to the exact URL the user is
@@ -494,7 +544,28 @@ Then sign in as a third account in a private window and confirm you can't see th
 until you're actually shared into it — and that you can't see someone's profile or
 connections unless you're connected to them or share a book with them.
 
-Two Postgres-side checks worth running once, since a missing one fails silently rather
+**Check the grants first, because without them nothing else matters.** RLS filters rows;
+it does not grant access to a table. A role needs the ordinary privilege before any policy
+is consulted, and Supabase's default privileges no longer supply it — a table created by
+`postgres` in `public` arrives with TRUNCATE/REFERENCES/TRIGGER and no CRUD. The symptom is
+`permission denied for table documents` on every single query, which looks nothing like an
+RLS problem. `schema.sql` and `social.sql` now grant explicitly; this confirms it landed:
+
+```sql
+-- Every cell must be true. Any false and the app 403s on that table.
+select t.name,
+       has_table_privilege('authenticated', 'public.' || t.name, 'SELECT') as sel,
+       has_table_privilege('authenticated', 'public.' || t.name, 'INSERT') as ins,
+       has_table_privilege('authenticated', 'public.' || t.name, 'UPDATE') as upd,
+       has_table_privilege('authenticated', 'public.' || t.name, 'DELETE') as del
+from (values ('documents'), ('memberships'), ('progress'), ('annotations'),
+             ('profiles'), ('connections'), ('invites')) as t(name);
+```
+
+If any are false, re-run `social.sql` — it re-grants all seven tables precisely so a
+database built before the grants were written down can be brought forward.
+
+Two more Postgres-side checks worth running once, since a missing one fails silently rather
 than with an error:
 
 ```sql
@@ -505,11 +576,13 @@ from pg_class where relname in ('annotations','progress','memberships','connecti
 ```
 
 ```sql
--- All four should show prosecdef = true (security definer). If any come back false,
+-- All five should show prosecdef = true (security definer). If any come back false,
 -- RLS applies to the function's own queries and it will 403 on the exact gap it
--- exists to cross.
+-- exists to cross. delete_account is in the list because it fails differently and
+-- worse: it reaches into the auth schema, which nothing else here does.
 select proname, prosecdef from pg_proc
-where proname in ('redeem_invite','share_document','revoke_share','merge_documents');
+where proname in ('redeem_invite','share_document','revoke_share','merge_documents',
+                  'delete_account');
 ```
 
 ### 2. Static hosting

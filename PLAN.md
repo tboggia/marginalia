@@ -269,6 +269,18 @@ it repoints every annotation and progress row and deletes the losing document. I
 guarded by re-checking the hash server-side (never trusting a client's earlier claim of a
 match) and by only letting the person giving up their own copy call it.
 
+The third question a pair never has to ask, and the second irreversible operation:
+leaving altogether. `delete_account()` is a hard delete where everything else in this
+phase is a mark on a row — a revoked membership is still a membership, precisely so
+re-sharing can resume — because an account has nothing to resume into. Nearly all of it
+is `on delete cascade` from `auth.users`; the design work is in the one thing that must
+not cascade. A book the leaver added but other people are still reading can't go with
+them (it would take those readers' highlights too) and can't be left ownerless either,
+since every owner check in `social.sql` reads `created_by`. So it's handed to whoever
+joined earliest, and `documents.created_by` keeps no cascade on purpose: if the hand-over
+were ever skipped, the foreign key refuses the deletion outright rather than quietly
+producing a book nobody can manage.
+
 > **Opus, high effort**, for `social.sql`'s RLS and RPCs, and for the group-spread rail
 > math in `app.js` (`renderSpine`, `clusterPositions`) — the second because the phase's
 > one hard constraint was that at exactly two readers, none of it may visibly change.
