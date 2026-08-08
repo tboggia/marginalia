@@ -26,6 +26,7 @@
  */
 
 import { readEpubSelection } from './epub-anchors.js';
+import { SELECTION_SETTLE_MS } from './anchors.js';
 import { rectToPage, mergeLineRects, quantize } from './geometry.js';
 
 const READ_WIDTH = 760; // px — capped for readability, centered like a PDF page
@@ -55,6 +56,12 @@ export class EpubReader {
     this._contentsByIndex = new Map();
     this._currentCfi = null;
     this._selectionTimer = null;
+    // The touch selection path's own debounce, and what opened the gesture it belongs
+    // to. Held on the instance rather than per-chapter: only one selection can exist
+    // across the whole book at a time, so a new one in another chapter should cancel
+    // whatever the last one had pending.
+    this._selectionSettleTimer = null;
+    this._lastPointerType = 'mouse';
     this._restoring = false;
     this._progressTimer = null;
 
@@ -145,11 +152,44 @@ export class EpubReader {
       this._selectionTimer = setTimeout(() => {
         const iframeEl = contents.window.frameElement;
         if (!iframeEl) return;
-        // Null (a collapsed click) goes through too: that's what tells app.js the
-        // reader clicked away, and the popover closes just like it does over a PDF.
-        this.onSelectionChange(readEpubSelection(contents, iframeEl, spineIndex));
+        const sel = readEpubSelection(contents, iframeEl, spineIndex);
+        // On touch, a real selection belongs to the selectionchange path below, which
+        // sees the final range rather than whatever the handles were around at lift-off.
+        if (sel && e.pointerType === 'touch') return;
+        // Null (a collapsed click) goes through on every pointer type: that's what tells
+        // app.js the reader clicked away, and the popover closes just like it does over a
+        // PDF. It stays on this path rather than the debounced one below because a tap
+        // that dismisses something should not have to wait for a selection to settle —
+        // and a tap inside this iframe never reaches app.js's own click-away listener.
+        this.onSelectionChange(sel);
       }, 0);
     });
+
+    /* The touch path, for the same reason app.js has one: a long press on text is
+       claimed by the browser's own selection gesture, so the pointerup above never
+       arrives and the handle-dragging that follows raises no pointer events here at
+       all. selectionchange is what survives it, debounced to its trailing edge so the
+       popover waits for the selection to settle rather than chasing every handle move.
+
+       Bound to the chapter's own document because that is where the selection lives —
+       a selection inside an iframe fires selectionchange on the iframe's document, not
+       on the host page's, which is why app.js's listener can never see this one. */
+    doc.addEventListener('pointerdown', (e) => {
+      this._lastPointerType = e.pointerType;
+    });
+    doc.addEventListener('selectionchange', () => {
+      if (this._lastPointerType !== 'touch') return;
+      clearTimeout(this._selectionSettleTimer);
+      this._selectionSettleTimer = setTimeout(() => {
+        const iframeEl = contents.window.frameElement;
+        if (!iframeEl) return;
+        const sel = readEpubSelection(contents, iframeEl, spineIndex);
+        // Only a real selection: dismissal is the pointerup path's job above, and it
+        // does it without the debounce this one owes to the handles.
+        if (sel) this.onSelectionChange(sel, { touch: true });
+      }, SELECTION_SETTLE_MS);
+    });
+
     doc.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') this.onSelectionChange(null);
     });
@@ -273,6 +313,7 @@ export class EpubReader {
     window.removeEventListener('resize', this._onResize);
     clearTimeout(this._progressTimer);
     clearTimeout(this._selectionTimer);
+    clearTimeout(this._selectionSettleTimer);
     this.rendition?.destroy();
     this.container.innerHTML = '';
     this.pages = [];

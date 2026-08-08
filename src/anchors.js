@@ -13,6 +13,21 @@
 import { rectToPage, mergeLineRects, quantize } from './geometry.js';
 
 /**
+ * How long a touch selection must hold still before it counts as finished.
+ *
+ * Touch has no "the gesture ended" event to listen for — see the selectionchange
+ * handlers in app.js and epub-reader.js for why — so the trailing edge of a debounce
+ * is the only signal that a selection has settled. Dragging a selection handle fires
+ * selectionchange continuously, which keeps resetting the timer; letting go is what
+ * finally lets it run. Long enough not to fire mid-drag, short enough not to feel
+ * like a lag between lifting your finger and the popover appearing.
+ *
+ * Lives here rather than in either caller because both readers need the same value
+ * and a touch gesture doesn't settle faster in one format than the other.
+ */
+export const SELECTION_SETTLE_MS = 350;
+
+/**
  * Read the current selection, if it lies inside exactly one page's text layer.
  * Returns null for collapsed selections, selections outside a page, and selections
  * that span two pages (which we reject rather than half-handle).

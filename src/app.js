@@ -11,7 +11,7 @@ import { Reader, IMAGE_GLYPH } from './reader.js';
 import { EpubReader } from './epub-reader.js';
 import { LocalStore, newId } from './store.js';
 import { config, isHosted, describeEnv } from './config.js';
-import { readSelection, hitTest } from './anchors.js';
+import { readSelection, hitTest, SELECTION_SETTLE_MS } from './anchors.js';
 import { redraw, distanceToStroke } from './ink.js';
 import { toPage } from './geometry.js';
 
@@ -1508,28 +1508,54 @@ function syncZoomUI() {
 }
 
 /* -------------------------------------------------------------- highlights */
-function handleSelection(sel) {
+/**
+ * How far below a touch selection the popover sits. Enough to clear the selection
+ * handle hanging off the end of the range — a teardrop roughly this tall on both
+ * Android and iOS — which would otherwise sit on top of the first button.
+ */
+const HANDLE_CLEARANCE = 30;
+
+/**
+ * `touch` puts the popover under the selection instead of over it. Above is right for
+ * a mouse, where nothing else is competing for that space; on touch the browser's own
+ * selection bar (Copy / Share / Select all) takes it, and nothing on the page can
+ * suppress that bar — so the two would overlap. Below is the space it leaves free.
+ */
+function handleSelection(sel, { touch = false } = {}) {
   if (!sel) return closePopover();
   if (sel.crossPage) {
     closePopover();
     return toast('Highlights stop at the page edge — select within one page.');
   }
   pending = sel;
-  openPopover(sel, sel.client.x, sel.client.y);
+  openPopover(sel, sel.client.x, sel.client.y,
+    touch ? { below: true, gap: HANDLE_CLEARANCE } : {});
 }
 
 function bindSelection() {
   // Where the current gesture started, so a drag can be told from a click. Only a drag
   // is evidence someone was trying to select something.
   let from = null;
+  // What opened the current gesture. Touch takes an entirely different route to the
+  // popover (see the selectionchange listener at the bottom of this function) and wants
+  // it placed on the other side of the selection.
+  let lastPointerType = 'mouse';
 
   // Click-away closes the popover. This fires on the way *into* any new gesture —
   // including the drag that will open the next popover — so the stale one never
   // lingers under it. Clicks on the popover itself are the one exception.
   document.addEventListener('pointerdown', (e) => {
     from = { x: e.clientX, y: e.clientY };
+    lastPointerType = e.pointerType;
     if (!e.target.closest('#pop')) closePopover();
   });
+
+  // A cancelled gesture is not a completed one, and on touch it is the *normal* ending
+  // rather than an edge case: promoting a long press to a text selection is exactly
+  // what makes the browser claim the pointer and cancel ours. Without this, `from`
+  // keeps the cancelled gesture's start point and the next pointerup measures its drag
+  // distance from the wrong place.
+  document.addEventListener('pointercancel', () => { from = null; });
 
   document.addEventListener('pointerup', (e) => {
     const start = from;
@@ -1540,7 +1566,14 @@ function bindSelection() {
     // top-document listener, so it arrives via reader.onSelectionChange instead.
     setTimeout(() => {
       const sel = readSelection(document);
-      if (sel) return handleSelection(sel);
+      if (sel) {
+        // Everything below this line is about a gesture that selected nothing, and
+        // touch still needs all of it — a tap is how you open a note on a phone. Only
+        // the popover is withheld: on touch the selectionchange listener owns it, and
+        // opening one here would race a range whose handles may still be moving.
+        if (e.pointerType !== 'touch') handleSelection(sel);
+        return;
+      }
       // Empty-handed. If they dragged across a page we know has no text layer, that's
       // not an idle click — it's the gesture this whole feature exists to answer.
       const pageEl = e.target.closest?.('[data-page]');
@@ -1564,6 +1597,34 @@ function bindSelection() {
     }, 0);
   });
 
+  /* How a touch selection reaches the popover, and why it needs its own path.
+   *
+   * Both mobile browsers promote a long press on text into their own selection
+   * gesture, and taking it over means taking over the pointer stream: the page gets a
+   * `pointercancel` where it expected a `pointerup`, so the handler above never runs.
+   * Dragging the handles afterwards produces no pointer events on the document at all —
+   * that UI is the browser's, not ours. `selectionchange` is the one event that
+   * survives the whole gesture, which makes it the only honest signal here.
+   *
+   * It fires continuously while a handle moves, so the popover is opened on the
+   * trailing edge — see SELECTION_SETTLE_MS. EPUB selections belong to a chapter
+   * iframe's document and fire on that one instead, so they never reach this listener;
+   * epub-reader.js runs the same idea against its own. */
+  let settle = null;
+  document.addEventListener('selectionchange', () => {
+    if (lastPointerType !== 'touch' || reader?.kind === 'epub') return;
+    clearTimeout(settle);
+    settle = setTimeout(() => {
+      if (tool !== 'select') return;
+      const sel = readSelection(document);
+      // Only a real selection opens the popover. A collapsed one means the browser
+      // cleared the range — a tap somewhere else, or our own removeAllRanges once a
+      // highlight is saved — and both of those have already closed the popover by
+      // another route. Calling handleSelection(null) here would just close it twice.
+      if (sel) handleSelection(sel, { touch: true });
+    }, SELECTION_SETTLE_MS);
+  });
+
   $('#pages').addEventListener('pointerdown', (e) => {
     if (tool !== 'erase') return;
     const pageEl = e.target.closest('[data-page]');
@@ -1574,7 +1635,7 @@ function bindSelection() {
   $('#scroller').addEventListener('scroll', closePopover, { passive: true });
 }
 
-function openPopover(sel, x, y) {
+function openPopover(sel, x, y, place = {}) {
   const pop = $('#pop');
   pop.innerHTML = '';
   delete pop.dataset.kind;
@@ -1590,22 +1651,25 @@ function openPopover(sel, x, y) {
   note.textContent = 'Add note';
   note.onclick = () => createHighlight(sel, me.color, true);
   pop.appendChild(note);
-  placePopover(x, y);
+  placePopover(x, y, place);
 }
 
-/** Open the popover at (x, y) in viewport pixels, kept inside the window. */
 /**
- * `below` flips the popover under the anchor instead of above it. Selection popovers
- * sit above the text they belong to; a popover hanging off the topbar has nothing above
- * it but the window edge.
+ * Open the popover at (x, y) in viewport pixels, kept inside the window.
+ *
+ * `below` flips it under the anchor instead of above it. Selection popovers sit above
+ * the text they belong to; a popover hanging off the topbar has nothing above it but
+ * the window edge, and a touch selection has the browser's own bar up there already.
+ * `gap` is the clearance from the anchor, which touch needs more of — see
+ * HANDLE_CLEARANCE.
  */
-function placePopover(x, y, { below = false } = {}) {
+function placePopover(x, y, { below = false, gap = 10 } = {}) {
   const pop = $('#pop');
   pop.dataset.open = 'true';
   const r = pop.getBoundingClientRect();
   pop.style.left = Math.min(Math.max(8, x - r.width / 2), innerWidth - r.width - 8) + 'px';
   pop.style.top = below
-    ? Math.min(y + 10, innerHeight - r.height - 8) + 'px'
+    ? Math.min(y + gap, innerHeight - r.height - 8) + 'px'
     : Math.max(8, y - r.height - 12) + 'px';
 }
 
