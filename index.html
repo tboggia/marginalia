@@ -406,6 +406,38 @@
   /* Your color, shown not chosen — the swatch in the toolbar is where it's set. */
   #pop .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 
+  /* ---------------------------------------------------------- the touch bar
+     On a phone the selection actions can't float beside the text. The browser
+     puts its own furniture there — Chrome draws a Copy/Share bar near the
+     selection and a Touch-to-Search panel along the bottom edge — and a page can
+     neither suppress those nor find out where they landed. So on touch the
+     actions dock under our own chrome instead, which is the one band of the
+     screen nothing else draws in. See app.js handleSelection.
+
+     The trade is that the bar no longer points at anything, which is what the
+     quote is for: it's the only thing left saying which passage these two
+     buttons are about. */
+  #pop[data-dock="true"] {
+    flex-direction: column; align-items: stretch; gap: 9px;
+    width: min(calc(100vw - 24px), 420px);
+    padding: 11px 12px 12px;
+  }
+  #pop[data-dock="true"] .sel-quote {
+    font-size: 11.5px; line-height: 1.45; color: var(--muted);
+    border-left: 2px solid var(--rule); padding-left: 8px;
+    display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
+    -webkit-box-orient: vertical; overflow: hidden;
+  }
+  #pop[data-dock="true"] .dock-row { display: flex; gap: 8px; }
+  /* 44px against the 26px a pointer gets. These are the only way to highlight
+     anything on a touch device, they're driven by a thumb rather than a cursor,
+     and 2.5.8 treats 24px as the floor rather than the target. */
+  #pop[data-dock="true"] button.act {
+    flex: 1; height: 44px; justify-content: center;
+    font-size: 13px; color: var(--text);
+    background: var(--panel);
+  }
+
   /* The refusal: same chrome as the highlight popover, and in the same place, because
      it's the answer to the gesture that would have opened that one. */
   #pop[data-kind="no-text"] {

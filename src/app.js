@@ -1509,17 +1509,19 @@ function syncZoomUI() {
 
 /* -------------------------------------------------------------- highlights */
 /**
- * How far below a touch selection the popover sits. Enough to clear the selection
- * handle hanging off the end of the range — a teardrop roughly this tall on both
- * Android and iOS — which would otherwise sit on top of the first button.
- */
-const HANDLE_CLEARANCE = 30;
-
-/**
- * `touch` puts the popover under the selection instead of over it. Above is right for
- * a mouse, where nothing else is competing for that space; on touch the browser's own
- * selection bar (Copy / Share / Select all) takes it, and nothing on the page can
- * suppress that bar — so the two would overlap. Below is the space it leaves free.
+ * `touch` docks the actions under the app's own topbar instead of floating them beside
+ * the selection.
+ *
+ * Floating is right for a pointer, where nothing competes for the space around the
+ * text. On touch the browser puts its own furniture there — Chrome draws a Copy /
+ * Share / Select all bar near the selection and a Touch-to-Search panel along the
+ * bottom edge — and a page can neither suppress those nor ask where they landed, since
+ * Chrome flips its bar above or below the range depending on room. Dodging them is
+ * guesswork that breaks on the next selection; the band under our own chrome is the
+ * one place nothing else draws.
+ *
+ * What that costs is the visual tie between the actions and the text they act on,
+ * which is why the docked bar quotes the selection back — see openPopover.
  */
 function handleSelection(sel, { touch = false } = {}) {
   if (!sel) return closePopover();
@@ -1528,8 +1530,7 @@ function handleSelection(sel, { touch = false } = {}) {
     return toast('Highlights stop at the page edge — select within one page.');
   }
   pending = sel;
-  openPopover(sel, sel.client.x, sel.client.y,
-    touch ? { below: true, gap: HANDLE_CLEARANCE } : {});
+  openPopover(sel, sel.client.x, sel.client.y, touch ? { dock: true } : {});
 }
 
 function bindSelection() {
@@ -1639,18 +1640,40 @@ function openPopover(sel, x, y, place = {}) {
   const pop = $('#pop');
   pop.innerHTML = '';
   delete pop.dataset.kind;
+  const dock = !!place.dock;
+  if (dock) pop.dataset.dock = 'true';
+  else delete pop.dataset.dock;
+
   // Your color is a standing preference (set in the who-dialog), not a per-highlight
   // decision — the popover shows it, it doesn't ask.
   const hl = document.createElement('button');
   hl.className = 'act';
   hl.innerHTML = `<span class="dot" style="background:${me.color}"></span>Highlight`;
   hl.onclick = () => createHighlight(sel, me.color, false);
-  pop.appendChild(hl);
   const note = document.createElement('button');
   note.className = 'act';
   note.textContent = 'Add note';
   note.onclick = () => createHighlight(sel, me.color, true);
-  pop.appendChild(note);
+
+  if (!dock) {
+    pop.append(hl, note);
+    return placePopover(x, y, place);
+  }
+
+  // Docked, the bar sits nowhere near the passage it acts on — so it has to name it.
+  // The quote is the only thing left tying the two together, and without it "Highlight"
+  // is a button with no visible object. textContent, not innerHTML: this is book text,
+  // and a PDF is a document from somewhere else.
+  if (sel.text) {
+    const quote = document.createElement('div');
+    quote.className = 'sel-quote';
+    quote.textContent = `“${sel.text.slice(0, 140)}”`;
+    pop.appendChild(quote);
+  }
+  const row = document.createElement('div');
+  row.className = 'dock-row';
+  row.append(hl, note);
+  pop.appendChild(row);
   placePopover(x, y, place);
 }
 
@@ -1659,24 +1682,36 @@ function openPopover(sel, x, y, place = {}) {
  *
  * `below` flips it under the anchor instead of above it. Selection popovers sit above
  * the text they belong to; a popover hanging off the topbar has nothing above it but
- * the window edge, and a touch selection has the browser's own bar up there already.
- * `gap` is the clearance from the anchor, which touch needs more of — see
- * HANDLE_CLEARANCE.
+ * the window edge. `dock` ignores the anchor entirely — see handleSelection for why a
+ * touch selection can't be anchored to anything at all.
  */
-function placePopover(x, y, { below = false, gap = 10 } = {}) {
+function placePopover(x, y, { below = false, dock = false } = {}) {
   const pop = $('#pop');
   pop.dataset.open = 'true';
   const r = pop.getBoundingClientRect();
+
+  if (dock) {
+    // Measured off whatever is currently the bottom of the app's chrome rather than
+    // computed from --top-h, so that on a scan — where the notice row is showing — the
+    // bar lands under the notice instead of on top of it.
+    const anchor = $('#notice').hidden ? $('#top') : $('#notice');
+    pop.style.top = anchor.getBoundingClientRect().bottom + 8 + 'px';
+    pop.style.left = Math.max(8, (innerWidth - r.width) / 2) + 'px';
+    return;
+  }
+
   pop.style.left = Math.min(Math.max(8, x - r.width / 2), innerWidth - r.width - 8) + 'px';
   pop.style.top = below
-    ? Math.min(y + gap, innerHeight - r.height - 8) + 'px'
+    ? Math.min(y + 10, innerHeight - r.height - 8) + 'px'
     : Math.max(8, y - r.height - 12) + 'px';
 }
 
 function closePopover() {
   $('#pop').dataset.open = 'false';
-  // Without this the next highlight popover inherits the refusal card's layout.
+  // Without these the next highlight popover inherits the refusal card's layout, or a
+  // mouse popover comes up wearing the touch bar's.
   delete $('#pop').dataset.kind;
+  delete $('#pop').dataset.dock;
   pending = null;
 }
 
